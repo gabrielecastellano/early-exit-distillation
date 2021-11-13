@@ -1,6 +1,8 @@
+import torch
 from torch import nn
 from torch.utils import model_zoo
 from torchvision.models.resnet import BasicBlock, Bottleneck
+from torchvision import models
 
 
 MODEL_URLS = {
@@ -91,14 +93,15 @@ def resnet152(param_config):
     return ResNet(Bottleneck, [3, 8, 36, 3], **param_config)
 
 
-def resnet_model(model_type, param_config, pretrained=False):
+def resnet_model(model_type, param_config, pretrained=False, weights=None, load_model=False):
     model = None
+    # TODO use resnet libraries and remove all the useless code
     if model_type == 'resnet18':
         model = resnet18(param_config)
     elif model_type == 'resnet34':
         model = resnet34(param_config)
     elif model_type == 'resnet50':
-        model = resnet50(param_config)
+        model = models.resnet50(**param_config)
     elif model_type == 'resnet101':
         model = resnet101(param_config)
     elif model_type == 'resnet152':
@@ -106,6 +109,9 @@ def resnet_model(model_type, param_config, pretrained=False):
 
     if model is None:
         raise ValueError('model_type `{}` is not expected'.format(model_type))
+    elif load_model and weights is not None:
+        model.load_state_dict(torch.load(weights))
+        return model
     elif pretrained:
         print('Loading pretrained weights..')
         model.load_state_dict(model_zoo.load_url(MODEL_URLS[model_type]))

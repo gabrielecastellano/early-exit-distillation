@@ -1,40 +1,41 @@
 dataset:
-    name: &dataset_name 'imagenet'
-    root: &data_dir './resource/data/ILSVRC2012/'
+    name: &dataset_name 'cifar100'
+    root: &data_dir './resource/data/cifar100/'
     data:
         train: !join [*data_dir, 'train.txt']
         valid: !join [*data_dir, 'valid.txt']
         test: !join [*data_dir, 'valid.txt']
     num_workers: 16
     normalizer:
-        mean: [0.485, 0.456, 0.406]
-        std: [0.229, 0.224, 0.225]
+        mean: [0.5070751592371323, 0.48654887331495095, 0.4409178433670343]
+        std: [0.2673342858792401, 0.2564384629170883, 0.27615047132568404]
 
 input_shape: [3, 224, 224]
 
 teacher_model:
-    config: './config/official/imagenet/org/densenet169.yaml'
+    config: './config/official/cifar100/org/resnet50.yaml'
     extract_designed_module: False
     start_idx: 0
-    end_idx: 30 # 14, 30, 66 for vers. 1, 2, 3
+    end_idx: 11 # 7, 15, 55 for vers. 1, 2, 3
+    input_shape: [3, 224, 224]
 
 student_model:
-    type: &smodel_type 'densenet169_head_mimic'
-    version: &ver '2b'
+    type: &smodel_type 'resnet50_head_mimic'
+    version: &ver '5b'
     experiment: &distill_experiment !join [*dataset_name, '-', *smodel_type, '-ver', *ver]
     params:
-        bottleneck_channel: &bottleneck_channel 12
+        bottleneck_channels: &bottleneck_channels 6
         use_aux: False
-    ckpt: !join ['./resource/ckpt/hnd/', *distill_experiment, '-', *bottleneck_channel, 'ch.pt']
+    ckpt: !join ['./resource/ckpt/hnd/', *distill_experiment, '-', *bottleneck_channels, 'ch.pt']
 
 mimic_model:
-    type: &mmodel_type 'densenet169_mimic'
+    type: &mmodel_type 'resnet50_mimic'
     experiment: &mimic_experiment !join [*dataset_name, '-', *mmodel_type, '-ver', *ver]
-    ckpt: !join ['./resource/ckpt/hnd/', *mimic_experiment, '-', *bottleneck_channel, 'ch.pt']
+    ckpt: !join ['./resource/ckpt/hnd/', *mimic_experiment, '-', *bottleneck_channels, 'ch.pt']
 
 train:
     epoch: 20
-    batch_size: 32
+    batch_size: 25
     rough_size: 256
     interval: -1
     optimizer:
@@ -52,4 +53,4 @@ train:
             reduction: 'sum'
 
 test:
-    batch_size: 1
+    batch_size: 25

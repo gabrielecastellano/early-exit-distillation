@@ -1,6 +1,7 @@
+import torch
 from torch import nn
 
-
+'''
 class SeqWithAux(nn.Module):
     def __init__(self, modules, aux_idx, aux_input_channel, aux_output_size):
         super().__init__()
@@ -22,7 +23,7 @@ class SeqWithAux(nn.Module):
             zs_aux = self.aux_seq(zs)
             return self.tail_modules(zs), self.linear(zs_aux.view(zs_aux.size(0), -1))
         return self.tail_modules(zs)
-
+'''
 
 class BaseHeadMimic(nn.Module):
     def __init__(self):
@@ -44,18 +45,43 @@ class BaseHeadMimic(nn.Module):
     def forward(self, sample_batch):
         raise NotImplementedError('forward function must be implemented')
 
+    def forward_to_bn(self, sample_batch):
+        raise NotImplementedError('forward function must be implemented')
+
+    def forward_from_bn(self, sample_batch):
+        raise NotImplementedError('forward function must be implemented')
+
+    def bn_shape(self, input_shape, device):
+        input_ = torch.empty(1, input_shape[0], input_shape[1], input_shape[2], device=device)
+        bn_output = self.forward_to_bn(input_)
+        return bn_output.shape[1:]
+
 
 class BaseMimic(nn.Module):
-    def __init__(self, student_model, tail_modules):
+    def __init__(self, head, tail):
+        """
+
+        Args:
+            head (BaseHeadMimic):
+            tail (list of nn.module):
+        """
         super().__init__()
-        self.student_model = student_model
-        self.features = nn.Sequential(*tail_modules[:-1])
-        self.classifier = tail_modules[-1]
+        self.head = head
+        self.tail = nn.Sequential(*tail[:-1])
+        self.classifier = tail[-1]
 
     def forward(self, sample_batch):
         zs = sample_batch
-        if self.student_model is not None:
-            zs = self.student_model(zs)
-
-        zs = self.features(zs)
+        if self.head is not None:
+            zs = self.head(zs)
+        zs = self.tail(zs)
         return self.classifier(zs.view(zs.size(0), -1))
+
+    def forward_to_bn(self, sample_batch):
+        return self.head.forward_to_bn(sample_batch)
+
+    def forward_from_bn(self, sample_batch):
+        zs = self.head.forward_from_bn(sample_batch)
+        zs = self.tail(zs)
+        return self.classifier(zs)
+

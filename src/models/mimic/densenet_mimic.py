@@ -1,6 +1,6 @@
 from torch import nn
 
-from models.mimic.base import BaseHeadMimic, BaseMimic, SeqWithAux
+from models.mimic.base import BaseHeadMimic, BaseMimic
 
 
 def mimic_version1(make_bottleneck, bottleneck_channel):
@@ -26,7 +26,8 @@ def mimic_version1(make_bottleneck, bottleneck_channel):
 
 
 def mimic_version2b_with_aux(modules, aux_idx, bottleneck_channel, aux_output_size=1000):
-    return SeqWithAux(modules, aux_idx=aux_idx, aux_input_channel=bottleneck_channel, aux_output_size=aux_output_size)
+    # return SeqWithAux(modules, aux_idx=aux_idx, aux_input_channel=bottleneck_channel, aux_output_size=aux_output_size)
+    return nn.Sequential(*modules)
 
 
 def mimic_version2(make_bottleneck, dataset_name, bottleneck_channel, use_aux):
