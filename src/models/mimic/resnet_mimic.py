@@ -311,8 +311,6 @@ class ResNetHeadMimic(BaseHeadMimic):
     def forward(self, sample_batch):
         zs = self.extractor(sample_batch)
         zs = self.module_seq1(zs)
-        zs = torch.nn.Upsample(5).forward(zs)
-        zs = torch.nn.Upsample(29).forward(zs)
         return self.module_seq2(zs)
 
     def forward_to_bn(self, sample_batch):
