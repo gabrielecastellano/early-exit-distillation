@@ -1,0 +1,69 @@
+dataset:
+    name: &dataset_name 'cifar100'
+    root: &data_dir './resource/data/cifar100/'
+    data:
+        train: !join [*data_dir, 'train.txt']
+        valid: !join [*data_dir, 'valid.txt']
+        test: !join [*data_dir, 'valid.txt']
+    num_workers: 16
+    normalizer:
+        mean: [0.5070751592371323, 0.48654887331495095, 0.4409178433670343]
+        std: [0.2673342858792401, 0.2564384629170883, 0.27615047132568404]
+
+input_shape: [3, 224, 224]
+
+teacher_model:
+    config: './config/official/cifar100/org/resnet50.yaml'
+    extract_designed_module: False
+    start_idx: 0
+    end_idx: 11 # 7, 15, 55 for vers. 1, 2, 3
+
+student_model:
+    type: &smodel_type 'resnet50_head_mimic'
+    version: &ver '5b'
+    params:
+        bottleneck_channels: &bottleneck_channels 6
+        use_aux: False
+    experiment: &distill_experiment !join [*dataset_name, '-', *smodel_type, '-ver', *ver, '-', *bottleneck_channels, 'ch']
+    ckpt: !join ['./resource/ckpt/hnd/', *distill_experiment, '.pt']
+
+mimic_model:
+    type: &mmodel_type 'resnet50_mimic'
+    experiment: &mimic_experiment !join [*dataset_name, '-', *mmodel_type, '-ver', *ver, '-', *bottleneck_channels, 'ch']
+    ckpt: !join ['./resource/ckpt/hnd/', *mimic_experiment, '.pt']
+
+ee_model:
+    type: &eemodel_type 'kmeans'
+    experiment: &ee_experiment !join [*dataset_name, '-', *mmodel_type, '-ver', *ver, '-', *bottleneck_channels, 'ch', '-', *eemodel_type]
+    params:
+        labels_subsets: [5, 10, 20, 50, 100]
+        clusters_per_labels: [1, 2, 3, 4, 5, 6, 7, 8]
+    threshold: 'auto'
+    load_embeddings: True
+    store_embeddings: False
+    storage: !join ['./resource/embeddings/', *dataset_name, '-', *mmodel_type, '-ver', *ver, '-', *bottleneck_channels, 'ch']
+    samples_per_class: 500
+    used_samples_per_class: 500
+    ckpt: !join ['./resource/ckpt/ee/', *ee_experiment, '_', '{}classes', '_', '{}per-class', '_', 'k{}', '.sav']
+
+train:
+    epoch: 20
+    batch_size: 25
+    rough_size: 256
+    interval: -1
+    optimizer:
+        type: 'Adam'
+        params:
+            lr: 0.001
+    scheduler:
+        type: 'MultiStepLR'
+        params:
+            milestones: [5, 10, 15]
+            gamma: 0.1
+    criterion:
+        type: 'MSELoss'
+        params:
+            reduction: 'sum'
+
+test:
+    batch_size: 10
