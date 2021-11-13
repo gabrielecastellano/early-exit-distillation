@@ -83,5 +83,5 @@ class BaseMimic(nn.Module):
     def forward_from_bn(self, sample_batch):
         zs = self.head.forward_from_bn(sample_batch)
         zs = self.tail(zs)
-        return self.classifier(zs)
+        return self.classifier(zs.view(zs.size(0), -1))
 
