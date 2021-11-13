@@ -91,7 +91,7 @@ def get_data_loaders(config, distributed):
     compress_size = compress_config.get('size', None)
     jpeg_quality = test_config.get('jquality', 0)
     dataset_name = dataset_config['name']
-    if dataset_name.startswith('caltech') or dataset_name.startswith('imagenet'):
+    if dataset_name.startswith('caltech') or dataset_name.startswith('imagenet') or dataset_name.startswith('cifar100'):
         return dataset_util.get_data_loaders(dataset_config, train_config['batch_size'],
                                              compress_type, compress_size, rough_size=train_config['rough_size'],
                                              reshape_size=config['input_shape'][1:3],

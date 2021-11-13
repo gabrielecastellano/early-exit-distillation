@@ -5,12 +5,12 @@ from models.classification.inception import Inception3
 from models.mimic.densenet_mimic import DenseNetHeadMimic, DenseNetMimic
 from models.mimic.inception_mimic import InceptionHeadMimic, InceptionMimic
 from models.mimic.mobilenet_mimic import MobileNetHeadMimic, MobileNetMimic
-from models.mimic.resnet_mimic import ResNet152HeadMimic, ResNetMimic
+from models.mimic.resnet_mimic import ResNetHeadMimic, ResNetMimic
 from myutils.common import file_util, yaml_util
 from utils import mimic_util, module_util
 
 
-def resume_from_ckpt(ckpt_file_path, model, is_student=False):
+def resume_from_ckpt(ckpt_file_path, model, device, is_student=False):
     if not file_util.check_if_exists(ckpt_file_path):
         print('{} checkpoint was not found at {}'.format("Student" if is_student else "Teacher", ckpt_file_path))
         if is_student:
@@ -18,7 +18,7 @@ def resume_from_ckpt(ckpt_file_path, model, is_student=False):
         return 1
 
     print('Resuming from checkpoint..')
-    ckpt = torch.load(ckpt_file_path)
+    ckpt = torch.load(ckpt_file_path, map_location=device)
     state_dict = ckpt['model']
     if not is_student and isinstance(model, Inception3) or\
             (hasattr(model, 'module') and isinstance(model.module, Inception3)):
@@ -49,7 +49,7 @@ def get_teacher_model(teacher_model_config, input_shape, device):
         model_config['params']['aux_logits'] = False
 
     model = module_util.get_model(teacher_config, device)
-    resume_from_ckpt(model_config['ckpt'], model)
+    resume_from_ckpt(model_config['ckpt'], model, device)
     return extract_teacher_model(model, input_shape, device, teacher_model_config), model_config['type']
 
 
@@ -62,8 +62,8 @@ def get_student_model(teacher_model_type, student_model_config, dataset_name):
         return DenseNetHeadMimic(teacher_model_type, student_model_version, dataset_name, **params_config)
     elif teacher_model_type == 'inception_v3' and student_model_type == 'inception_v3_head_mimic':
         return InceptionHeadMimic(student_model_version, dataset_name, **params_config)
-    elif teacher_model_type.startswith('resnet') and student_model_type == 'resnet152_head_mimic':
-        return ResNet152HeadMimic(student_model_version, dataset_name, **params_config)
+    elif teacher_model_type.startswith('resnet') and student_model_type == 'resnet152_head_mimic' or student_model_type == 'resnet50_head_mimic':
+        return ResNetHeadMimic(student_model_version, dataset_name, **params_config)
     elif teacher_model_type == 'mobilenet_v2' and student_model_type == 'mobilenet_v2_head_mimic':
         return MobileNetHeadMimic(student_model_version, **params_config)
     raise ValueError('teacher_model_type `{}` is not expected'.format(teacher_model_type))
@@ -73,7 +73,7 @@ def load_student_model(config, teacher_model_type, device):
     student_model_config = config['student_model']
     student_model = get_student_model(teacher_model_type, student_model_config, config['dataset']['name'])
     student_model = student_model.to(device)
-    resume_from_ckpt(student_model_config['ckpt'], student_model, True)
+    resume_from_ckpt(student_model_config['ckpt'], student_model, device, True)
     return student_model
 
 
@@ -84,7 +84,7 @@ def get_org_model(teacher_model_config, device):
 
     model = module_util.get_model(teacher_config, device)
     model_config = teacher_config['model']
-    resume_from_ckpt(model_config['ckpt'], model)
+    resume_from_ckpt(model_config['ckpt'], model, device)
     return model, model_config['type']
 
 

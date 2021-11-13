@@ -27,7 +27,7 @@ def write_converted_dataset(data_list, rgb_only, output_file_path, delimiter='\t
                     img = Image.open(image_file_path)
                     if img.mode != 'RGB':
                         continue
-                fp.write('{}{}{}\n'.format(image_file_path, delimiter, label_name))
+                fp.write('{}{}{}\n'.format(os.path.expanduser(image_file_path), delimiter, label_name))
 
 
 def convert_caltech_dataset(input_dir_path, val_rate, test_rate, rgb_only, output_dir_path):
@@ -75,6 +75,8 @@ def run(args):
     if dataset_type == 'caltech':
         convert_caltech_dataset(input_dir_path, valid_rate, test_rate, rgb_only, output_dir_path)
     elif dataset_type == 'imagenet':
+        convert_imagenet_dataset(input_dir_path, output_dir_path)
+    elif dataset_type == 'cifar':
         convert_imagenet_dataset(input_dir_path, output_dir_path)
     else:
         raise ValueError('dataset_type `{}` is not expected'.format(dataset_type))

@@ -120,7 +120,7 @@ def distill(train_loader, valid_loader, input_shape, aux_weight, config, device,
     student_model_config = config['student_model']
     student_model = mimic_util.get_student_model(teacher_model_type, student_model_config, config['dataset']['name'])
     student_model = student_model.to(device)
-    start_epoch, best_valid_acc = mimic_util.resume_from_ckpt(student_model_config['ckpt'], student_model,
+    start_epoch, best_valid_acc = mimic_util.resume_from_ckpt(student_model_config['ckpt'], student_model, device,
                                                               is_student=True)
     if best_valid_acc is None:
         best_valid_acc = 0.0
@@ -179,7 +179,7 @@ def run(args):
     input_shape = config['input_shape']
     train_config = config['train']
     test_config = config['test']
-    train_loader, valid_loader, test_loader =\
+    train_loader, valid_loader, test_loader, _ =\
         dataset_util.get_data_loaders(dataset_config, batch_size=train_config['batch_size'],
                                       rough_size=train_config['rough_size'], reshape_size=input_shape[1:3],
                                       test_batch_size=test_config['batch_size'], jpeg_quality=-1,

@@ -67,9 +67,11 @@ def test(model, data_loader, device, interval=1000, split_name='Test'):
     header = '{}:'.format(split_name)
     proc_time_list = list()
     with torch.no_grad():
+        # upsampler = torch.nn.Upsample(226).cuda()
         for image, target in metric_logger.log_every(data_loader, interval, header):
             image = image.to(device, non_blocking=True)
             target = target.to(device, non_blocking=True)
+            # image = upsampler.forward(image)
             start_time = time.time()
             output = model(image)
             end_time = time.time()
