@@ -1,5 +1,4 @@
 import argparse
-import parse
 import datetime
 import json
 import time
@@ -12,14 +11,13 @@ from pathlib import Path
 from torch import distributed as dist
 from torch.backends import cudnn
 from torch.nn import DataParallel
-from torch.nn import functional
 from torch.nn.parallel.distributed import DistributedDataParallel
 
 import early_classifier.base
 from early_classifier.ee_utils import iterate_configurations
 from myutils.common import file_util, yaml_util
 from myutils.pytorch import func_util, module_util
-from structure.logger import MetricLogger, SmoothedValue
+from structure.logger import MetricLogger, SmoothedValue, CtrValue
 from utils import main_util, mimic_util, dataset_util
 
 from early_classifier.base import BaseClassifier
@@ -31,9 +29,10 @@ def get_argparser():
     argparser.add_argument('--config', required=True, help='yaml file path')
     argparser.add_argument('--device', default='cuda', help='device')
     argparser.add_argument('-bn_train', action='store_true', help='train a bottlenecked model by distilling a teacher')
-    argparser.add_argument('-org_ev', action='store_true', help='evaluate also the original model')
+    argparser.add_argument('-org_eval', action='store_true', help='evaluate the original model')
+    argparser.add_argument('-bn_eval', action='store_true', help='evaluate the bottlenecked model')
     argparser.add_argument('-ee_joint_train', action='store_true', help='train an early exit model jointly')
-    argparser.add_argument('-ee_post_train', action='store_true', help='train an early exit model independently')
+    argparser.add_argument('-ee_solo_train', action='store_true', help='train an early exit model independently')
     # distributed training parameters
     argparser.add_argument('--world_size', default=1, type=int, help='number of distributed processes')
     argparser.add_argument('--dist_url', default='env://', help='url used to set up distributed training')
@@ -85,6 +84,7 @@ def evaluate(model, data_loader, device, ee_model=None, ee_threshold=0, interval
     torch.set_num_threads(1)
     model.eval()
     metric_logger = MetricLogger(delimiter='  ')
+    metric_logger.add_counter('early_predictions', CtrValue())
     header = '{}:'.format(split_name)
     with torch.no_grad():
         img_ctr_wide = -1
@@ -106,25 +106,26 @@ def evaluate(model, data_loader, device, ee_model=None, ee_threshold=0, interval
                 new_early_exits = 0
             else:
                 # run model up to bottleneck
-                bn_output = model.forward_to_bn(image).cpu()
-                latent_vectors = bn_output.detach().numpy()
-                latent_vectors = latent_vectors.reshape(latent_vectors.shape[0], np.prod(latent_vectors.shape[1:]))
+                bn_output = model.forward_to_bn(image)
+                embeddings = bn_output.to(device)
+                embeddings = embeddings.reshape(embeddings.shape[0], embeddings.shape[1:].numel())
 
                 # early prediction
-                ee_output = ee_model.predict(np.array(latent_vectors))
+                ee_output = ee_model.predict(embeddings)
                 ee_conf = ee_model.get_prediction_confidences(ee_output)
 
                 # forward not-confident vectors to the full model
                 # c, p = torch.max(torch.nn.functional.softmax(ee_output[i], dim=0), 0)
                 # full_predictions = bn_output[ee_output < ee_threshold].gpu()
-                full_predictions = bn_output[ee_conf < ee_threshold].gpu()
+                full_predictions = bn_output[ee_conf < ee_threshold]
                 new_early_exits = data_loader.batch_size - full_predictions.shape[0]
                 # early_exit_ctr += new_early_exits
-                full_output = model.forward_from_bn(full_predictions)
+                full_output = model.forward_from_bn(full_predictions.to(device))
 
                 # merge early and full predictions
+                output = ee_output
                 j = 0
-                for i in enumerate(ee_output):
+                for i in range(len(ee_output)):
                     if ee_conf[i] < ee_threshold:
                         output[i] = full_output[j]
                         j += 1
@@ -132,7 +133,7 @@ def evaluate(model, data_loader, device, ee_model=None, ee_threshold=0, interval
             acc1, acc5 = main_util.compute_accuracy(output, target, topk=(1, 5))
             metric_logger.meters['acc1'].update(acc1.item(), n=data_loader.batch_size)
             metric_logger.meters['acc5'].update(acc5.item(), n=data_loader.batch_size)
-            metric_logger.meters['early_predictions'].update(new_early_exits, n=data_loader.batch_size)
+            metric_logger.counters['early_predictions'].update(new_early_exits, data_loader.batch_size)
 
     # gather the stats from all processes
     metric_logger.synchronize_between_processes()
@@ -364,6 +365,7 @@ def get_embeddings(data_loader, model, overall_samples, overall_samples_per_clas
                     cache_labels[img_ctr] = prediction[i]
                     cache_confidences[img_ctr] = confidence[i]
                     cache_data[img_ctr] = embedding.reshape(np.prod(embedding.shape))
+                    img_ctr += 1
         torch.set_num_threads(num_threads)
     if store:
         save_embeddings_on_storage(cache_data, cache_labels, cache_labels_t, cache_confidences, embedding_storage)
@@ -373,45 +375,47 @@ def get_embeddings(data_loader, model, overall_samples, overall_samples_per_clas
 def save_embeddings_on_storage(cache_data, cache_labels, cache_labels_t, cache_confidences, storage_folder):
     if not os.path.exists(storage_folder):
         os.mkdir(storage_folder)
-    for img_ctr, embedding in cache_data:
+    for img_ctr, embedding in enumerate(cache_data):
         torch.save(cache_data[img_ctr], f'{storage_folder}/embedding_{img_ctr}.sav')
     torch.save(cache_labels, f'{storage_folder}/labels.sav')
     torch.save(cache_labels_t, f'{storage_folder}/labels_t.sav')
     torch.save(cache_confidences, f'{storage_folder}/confidences.sav')
 
 
-def train_ee_model(eval_loader, full_model, ee_config, cache_data, cache_labels, cache_confidences,
-                   used_samples_per_class, device):
+def train_ee_model(full_model, ee_config, cache_data, cache_labels, cache_confidences,
+                   used_samples_per_class, valid_loader, device):
     ee_type = ee_config['type']
     experiment_name = ee_config['experiment']
     results = dict()
-    best_ee_accuracy = dict()
     best_ee_model = dict()
 
-    for ee_params in iterate_configurations(ee_type, ee_config['params'], device):
+    configurations = iterate_configurations(ee_type, ee_config['params'], device, ee_config['threshold'])
+
+    for ee_params in configurations:
         label_subset = ee_params['n_labels']
         samples_subset = used_samples_per_class * label_subset
         instance_key = f"{label_subset}:{used_samples_per_class}"
+
         # Initialize early exit model
         ee_model = early_classifier.ee_utils.models[ee_type](**ee_params)
-        # Train early exit model
-        print(f"Fitting early exit model of type '{ee_type}' with parameters '{ee_params}'...")
-        ee_model.fit(cache_data[:samples_subset], cache_labels[:samples_subset], cache_confidences[:samples_subset])
-        # Evaluate early exit model
+
         results.setdefault(instance_key, dict())
-        best_ee_accuracy.setdefault(instance_key, 0)
-        r = evaluate_ee_model(ee_model, full_model, eval_loader, label_subset, device)
-        results[instance_key][ee_model.key_param()] = r
-        if r['accuracy'] > best_ee_accuracy[instance_key]:
-            best_ee_accuracy[instance_key] = r['accuracy']
-            best_ee_model[instance_key] = ee_model
+        best_ee_model.setdefault(instance_key, dict())
 
-    # store results on disk
-    dname = f'ee_stats_{ee_type}/stats'
-    Path(dname).mkdir(parents=True, exist_ok=True)
-    with open(f"{dname}/{experiment_name}_{time.strftime('%Y%m%d-%H%M%S')}.json", "w") as f:
-        json.dump(results, f)
+        print(f"Fitting early exit model of type '{ee_type}' with parameters '{ee_params}'...")
+        for epoch in range(ee_params['epochs']):
 
+            # Train early exit model one epoch
+            ee_model.fit(cache_data[:samples_subset], cache_labels[:samples_subset], cache_confidences[:samples_subset], epoch=epoch)
+            # Evaluate early exit model
+            r = evaluate_ee_model(ee_model, full_model, valid_loader, device, use_threshold=True)
+
+            results[instance_key].setdefault(ee_model.key_param(), r)
+            if r['performance'] >= results[instance_key][ee_model.key_param()]['performance']:
+                results[instance_key][ee_model.key_param()] = r
+                best_ee_model[instance_key][ee_model.key_param()] = ee_model.to_state_dict()
+
+    '''
     # store best model
     dname = ee_config['ckpt']
     Path(dname).mkdir(parents=True, exist_ok=True)
@@ -419,21 +423,50 @@ def train_ee_model(eval_loader, full_model, ee_config, cache_data, cache_labels,
         label_subset, used_samples_per_class = parse.parse("{}:{}", instance_key)
         ee_model_file = dname.format(label_subset, used_samples_per_class, ee_model.key_param())
         ee_model.save(ee_model_file)
+    '''
 
+    # store best model for last configuration
+    ee_params = configurations[-1]
+    label_subset = ee_params['n_labels']
+    instance_key = f"{label_subset}:{used_samples_per_class}"
+    ee_model = early_classifier.ee_utils.models[ee_type](**ee_params)
+    ee_model.from_state_dict(best_ee_model[instance_key][ee_model.key_param()])
+    dname = ee_config['ckpt']
+    Path(dname).mkdir(parents=True, exist_ok=True)
+    ee_model_file = dname.format(label_subset, used_samples_per_class, ee_model.key_param())
+    ee_model.save(ee_model_file)
 
-def evaluate_ee_model(ee_model, full_model, data_loader, label_subset, device, interval=10, split_name='Evaluate EE'):
+    # store results on disk
+    dname = f'ee_stats_{ee_type}/stats'
+    Path(dname).mkdir(parents=True, exist_ok=True)
+    with open(f"{dname}/{experiment_name}_{time.strftime('%Y%m%d-%H%M%S')}.json", "w") as f:
+        json.dump(results, f)
+
+def evaluate_ee_model(ee_model, full_model, data_loader, device, interval=10, split_name='Evaluate EE', use_threshold=True):
+
+    # TODO this could be speedup by caching evaluation embeddings
 
     metric_logger = MetricLogger(delimiter='  ')
+    metric_logger.add_counter('early_predictions', CtrValue())
+    metric_logger.add_meter('ee_acc1', SmoothedValue())
+    metric_logger.add_meter('ee_acc5', SmoothedValue())
+    metric_logger.add_meter('ee_acc1_c', SmoothedValue())
+    metric_logger.add_meter('ee_acc5_c', SmoothedValue())
     header = '{}:'.format(split_name)
+    num_threads = torch.get_num_threads()
+    torch.set_num_threads(1)
+    ee_model.eval()
+    full_model.eval()
 
     for image, target in metric_logger.log_every(data_loader, interval, header):
-        image = image.to(device, non_blocking=True)
+        image = image.to(full_model.device, non_blocking=True)
         target = target.to(device, non_blocking=True)
-        if any([t > label_subset - 1 for t in target]):
+        if any([t > ee_model.n_labels - 1 for t in target]):
             break
 
         # run full model up to bottleneck
-        embeddings = full_model.forward_to_bn(image)
+        embeddings = full_model.forward_to_bn(image).to(device)
+        embeddings = embeddings.reshape(embeddings.shape[0], embeddings.shape[1:].numel())
 
         # ee prediction
         # predictions, confidences = ee_model.predict(np.array(embeddings))
@@ -441,26 +474,46 @@ def evaluate_ee_model(ee_model, full_model, data_loader, label_subset, device, i
         # confident_targets = target[confidences < ee_model.get_threshold()]
         ee_output = ee_model.predict(embeddings)
         ee_conf = ee_model.get_prediction_confidences(ee_output)
-        confident_output = ee_output[ee_conf >= ee_model.get_threshold()]
-        confident_targets = target[ee_conf >= ee_model.get_threshold()]
+        if not use_threshold:
+            confidence_threshold = 0.2
+        else:
+            confidence_threshold = ee_model.get_threshold()
+        confident_output = ee_output[ee_conf >= confidence_threshold]
+        confident_targets = target[ee_conf >= confidence_threshold]
 
         # compute performance metrics
-        acc1, acc5 = main_util.compute_accuracy(confident_output, confident_targets, topk=(1, 5))
+        early_predictions = confident_output.shape[0]
+        acc1, acc5 = main_util.compute_accuracy(ee_output, target, topk=(1, 5))
+        acc1_c, acc5_c = main_util.compute_accuracy(confident_output, confident_targets, topk=(1, 5))
         metric_logger.meters['ee_acc1'].update(acc1.item(), n=data_loader.batch_size)
         metric_logger.meters['ee_acc5'].update(acc5.item(), n=data_loader.batch_size)
-        metric_logger.meters['early_predictions'].update(confident_output.shape[0], n=data_loader.batch_size)
+        metric_logger.meters['ee_acc1_c'].update(acc1_c.item(), n=early_predictions)
+        metric_logger.meters['ee_acc5_c'].update(acc5_c.item(), n=early_predictions)
+        metric_logger.counters['early_predictions'].update(early_predictions, data_loader.batch_size)
+
+    torch.set_num_threads(num_threads)
 
     # gather the stats from all processes
     metric_logger.synchronize_between_processes()
     top1_accuracy = metric_logger.ee_acc1.global_avg
     top5_accuracy = metric_logger.ee_acc5.global_avg
+    top1_accuracy_c = metric_logger.ee_acc1_c.global_avg
+    top5_accuracy_c = metric_logger.ee_acc5_c.global_avg
     early_predictions = metric_logger.early_predictions.global_avg
-    print(' * Acc@1 {:.4f}\tAcc@5 {:.4f}\n'.format(top1_accuracy, top5_accuracy))
-    print(' * Fraction of early predictions {:.4f}\n'.format(early_predictions))
+    # Compute a performance metric that considers both accuracy and percentage of confident predictions
+    # performance_metric = 1.5 * top1_accuracy_c + 100*early_predictions
+    # performance_metric = ((min(top1_accuracy_c, 85)*0.01)**2 + 0.5) * (early_predictions + 0.5)
+    performance_metric = ((min(top1_accuracy_c, 85)*0.01) + 0.5)**5 * early_predictions
+
+    print(' * OVERALL:\t\tAcc@1 {:.4f}\tAcc@5 {:.4f}'.format(top1_accuracy, top5_accuracy))
+    print(' * CONFIDENT:\t\tAcc@1 {:.4f}\tAcc@5 {:.4f}\t(fraction of early predictions {:.4f})'.format(top1_accuracy_c, top5_accuracy_c, early_predictions))
+    print(' * Performance metric:\t{:.4f}'.format(performance_metric))
 
     results = ee_model.init_results()
-    results["accuracy"] = top1_accuracy
-    results["predicted"] = early_predictions
+    results['overall_accuracy'] = top1_accuracy
+    results['confident_accuracy'] = top1_accuracy_c
+    results['predicted'] = early_predictions
+    results['performance'] = performance_metric
 
     return results
 
@@ -493,7 +546,7 @@ def run(args):
                                       rough_size=int(256/224*teacher_input_shape[-1]),
                                       reshape_size=teacher_input_shape[1:3],
                                       test_batch_size=test_config['batch_size'], jpeg_quality=-1,
-                                      distributed=distributed, order_labels=(args.ee_post_train or args.ee_joint_train))
+                                      distributed=distributed, order_labels=(args.ee_solo_train or args.ee_joint_train))
 
     # Train student model through distillation from the teacher model
     if args.bn_train:
@@ -504,7 +557,7 @@ def run(args):
                 device_ids, ee_model=ee_model, ee_threshold=ee_threshold)
 
     # Train the early exit model starting for an already trained student model
-    if args.ee_post_train:
+    if args.ee_solo_train:
         samples = len(ctrain_loader.dataset)
         samples_per_class = ee_config['samples_per_class']
         used_samples_per_class = ee_config['used_samples_per_class']
@@ -517,25 +570,36 @@ def run(args):
                                                                         load_from_storage=load_embeddings,
                                                                         store=store_embeddings,
                                                                         embedding_storage=embeddings_storage)
-        train_ee_model(ctrain_loader, mimic_model, ee_config, cache_data, cache_labels, cache_confidences,
-                       used_samples_per_class, device)
+        # TODO directly build data loaders (both train and test) here using the cache data
+        train_ee_model(mimic_model, ee_config, cache_data, cache_labels, cache_confidences,
+                       used_samples_per_class, valid_loader, device)
 
     # Test original model
     org_model, teacher_model_type = mimic_util.get_org_model(teacher_model_config, device)
-    if args.org_ev:
+    if args.org_eval:
         if distributed:
             org_model = DataParallel(org_model, device_ids=device_ids)
         evaluate(org_model, test_loader, device, title='[Original model]')
 
-    # Test student model with Early Exit
+    # Test mimic model
     mimic_model = mimic_util.get_mimic_model(config, org_model, teacher_model_type, teacher_model_config, device)
     mimic_model_without_dp = mimic_model.module if isinstance(mimic_model, DataParallel) else mimic_model
+    if args.bn_eval:
+        if distributed:
+            mimic_model = DataParallel(mimic_model, device_ids=device_ids)
+        evaluate(mimic_model, test_loader, device, title='[BN model]')
+
+    # Test early exit model
     ee_model = ee_utils.get_ee_model(ee_config, device, pre_trained=True)
+    evaluate_ee_model(ee_model, mimic_model, valid_loader, device)
+
+    # Joint test mimic model with early exit model
     file_util.save_pickle(mimic_model_without_dp, config['mimic_model']['ckpt'])
     if distributed:
         mimic_model = DistributedDataParallel(mimic_model_without_dp, device_ids=device_ids)
-    ee_threshold = ee_model.get_threshold() if ee_threshold == 'auto' else ee_threshold
-    # evaluate(mimic_model, test_loader, device, ee_model=ee_model, ee_threshold=ee_threshold, title='[Mimic_EE model]')
+    ee_threshold = ee_model.get_threshold()
+    if ee_model.n_labels == mimic_model.out_features:
+        evaluate(mimic_model, test_loader, device, ee_model=ee_model, ee_threshold=ee_threshold, title='[BN_EE model]')
 
 
 if __name__ == '__main__':

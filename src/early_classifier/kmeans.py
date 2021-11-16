@@ -22,7 +22,7 @@ class KMeansClassifier(BaseClassifier):
         self.valid_shares = None
         self.share_threshold = 0
 
-    def fit(self, x, y, c):
+    def fit(self, x, y, c, epoch=0):
         # clustering
         self.model.fit(x)
 
@@ -49,24 +49,23 @@ class KMeansClassifier(BaseClassifier):
 
         # only keep clusters featuring more than one item
         self.valid_shares = [share for i, share in enumerate(self.shares) if self.cluster_sizes[i] > 1]
-        self.share_threshold = np.quantile(self.valid_shares, 0.2)
-
+        self.share_threshold = np.quantile(self.valid_shares, 0.5)
 
     def predict(self, x):
         x = x.cpu()
-        x = x.detach().numpy()
+        x = x.detach()
         x = x.reshape(x.shape[0], np.prod(x.shape[1:]))
         # TODO is it possible to work directly with tensors?
-        y = np.zeros((x.shape[0], self.n_labels), dtype=np.float32)
+        y = torch.zeros((x.shape[0], self.n_labels))
         predicted_clusters = self.model.predict(x)
         for i, cluster in enumerate(predicted_clusters):
             if cluster != -1:
                 # Naive confidence: fraction of label shares in the cluster
                 y[i][self.max_labels[cluster]] = self.shares[cluster]
-        return torch.Tensor(y).to(self.device)
+        return y.to(self.device)
 
     def get_prediction_confidences(self, y):
-        return torch.max(y, 1)[0]
+        return torch.max(y, -1)[0]
 
     def get_threshold(self):
         return self.share_threshold
@@ -78,9 +77,9 @@ class KMeansClassifier(BaseClassifier):
         return d
 
     def key_param(self):
-        return self.k
+        return self.get_threshold()
 
-    def save(self, filename):
+    def to_state_dict(self):
         model_dict = dict({
             'model': self.model,
             'metadata': {
@@ -92,10 +91,10 @@ class KMeansClassifier(BaseClassifier):
                 'share_threshold': self.share_threshold
             }
         })
-        joblib.dump(model_dict, open(filename, 'wb'))
+        return  model_dict
 
-    def load(self, filename):
-        model_dict = joblib.load(filename)
+
+    def from_state_dict(self, model_dict):
         if model_dict['metadata']['type'] != 'kmeans':
             raise TypeError("Expected model type 'kmeans'.")
         self.model = model_dict['model']
@@ -104,3 +103,14 @@ class KMeansClassifier(BaseClassifier):
         self.shares = model_dict['metadata']['shares']
         self.valid_shares = model_dict['metadata']['valid_shares']
         self.share_threshold = model_dict['metadata']['share_threshold']
+
+    def save(self, filename):
+        model_dict = self.to_state_dict()
+        joblib.dump(model_dict, open(filename, 'wb'))
+
+    def load(self, filename):
+        model_dict = joblib.load(filename)
+        self.from_state_dict(model_dict)
+
+    def eval(self):
+        pass
