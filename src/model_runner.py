@@ -146,7 +146,7 @@ def run(args):
 
     print(args)
     config = yaml_util.load_yaml_file(args.config)
-    train_loader, valid_loader, test_loader = main_util.get_data_loaders(config, distributed)
+    train_loader, valid_loader, test_loader, _ = main_util.get_data_loaders(config, distributed)
     if 'mimic_model' in config:
         model = mimic_util.get_mimic_model_easily(config, device)
         model_config = config['mimic_model']
