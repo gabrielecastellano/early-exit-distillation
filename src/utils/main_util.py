@@ -4,6 +4,8 @@ import os
 
 import torch
 import torch.distributed as dist
+from torch import Tensor, tensor
+
 from utils import dataset_util
 
 
@@ -101,6 +103,8 @@ def get_data_loaders(config, distributed):
 
 
 def compute_accuracy(output, target, topk=(1,)):
+    if len(target) == 0:
+        return [torch.zeros(1) for _ in topk]
     maxk = max(topk)
     batch_size = target.size(0)
     _, pred = output.topk(maxk, 1, True, True)

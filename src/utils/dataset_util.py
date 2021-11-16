@@ -1,6 +1,8 @@
 import multiprocessing
 
 import os
+import random
+
 import torch
 from torch.utils.data import DataLoader, RandomSampler, SequentialSampler
 from torch.utils.data.distributed import DistributedSampler
@@ -138,15 +140,19 @@ class PerLabelSampler(Sampler):
         data_source (Dataset): dataset to sample from
     """
 
-    def __init__(self, data_source):
+    def __init__(self, data_source, shuffle=False):
         super().__init__(data_source)
         self.data_source = data_source
+        self.shuffle = shuffle
         l = [(c, i) for i, c in enumerate(self.data_source.targets)]
-        l.sort()
+        l.sort(key=lambda e: (e[0], random.random()) if shuffle else (e[0], e[1]))
         self.ordered_indexes = [i for _, i in l]
 
     def __iter__(self):
-
+        if self.shuffle:
+            l = [(c, i) for i, c in enumerate(self.data_source.targets)]
+            l.sort(key=lambda e: (e[0], random.random()))
+            self.ordered_indexes = [i for _, i in l]
         return iter(self.ordered_indexes)
 
     def __len__(self):

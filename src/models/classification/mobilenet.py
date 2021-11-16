@@ -1,5 +1,5 @@
 from torch import nn
-from torchvision.models.utils import load_state_dict_from_url
+from torch.utils import model_zoo
 
 
 model_urls = {
@@ -175,9 +175,7 @@ def mobilenet_v2(pretrained=False, progress=True, **kwargs):
     model = MobileNetV2(**kwargs)
     if pretrained:
         print('Loading pretrained weights..')
-        state_dict = load_state_dict_from_url(model_urls['mobilenet_v2'],
-                                              progress=progress)
-        model.load_state_dict(state_dict)
+        model.load_state_dict(model_zoo.load_url(model_urls['mobilenet_v2'], progress=progress))
     return model
 
 

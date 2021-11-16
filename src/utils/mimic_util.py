@@ -123,6 +123,7 @@ def get_mimic_model(config, org_model, teacher_model_type, teacher_model_config,
         mimic_model = MobileNetMimic(student_model, tail_modules)
     else:
         raise ValueError('mimic_type `{}` is not expected'.format(mimic_type))
+    mimic_model.device = device
     return mimic_model.to(device)
 
 

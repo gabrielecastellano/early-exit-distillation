@@ -63,12 +63,13 @@ class BaseMimic(nn.Module):
 
         Args:
             head (BaseHeadMimic):
-            tail (list of nn.module):
+            tail (list of nn.Module):
         """
         super().__init__()
         self.head = head
         self.tail = nn.Sequential(*tail[:-1])
         self.classifier = tail[-1]
+        self.device = None
 
     def forward(self, sample_batch):
         zs = sample_batch
@@ -84,4 +85,8 @@ class BaseMimic(nn.Module):
         zs = self.head.forward_from_bn(sample_batch)
         zs = self.tail(zs)
         return self.classifier(zs.view(zs.size(0), -1))
+
+    @property
+    def out_features(self):
+        return self.classifier.out_features
 
