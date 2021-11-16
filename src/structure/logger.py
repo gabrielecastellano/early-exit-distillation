@@ -51,15 +51,86 @@ class SmoothedValue(object):
 
     @property
     def global_avg(self):
-        return self.total / self.count
+        return self.total / self.count if self.count else 0
 
     @property
     def max(self):
-        return max(self.deque)
+        return max(self.deque) if self.count else 0
 
     @property
     def value(self):
-        return self.deque[-1]
+        return self.deque[-1] if self.count else 0
+
+    def __str__(self):
+        return self.fmt.format(
+            median=self.median,
+            avg=self.avg,
+            global_avg=self.global_avg,
+            max=self.max,
+            value=self.value)
+
+
+class CtrValue(object):
+    """
+    Track a counter and provide access to fraction value over a global window.
+    """
+
+    def __init__(self, window_size=20, fmt=None):
+        if fmt is None:
+            fmt = "{median:.4f} ({global_avg:.4f})"
+        self.c_deque = deque(maxlen=window_size)
+        self.t_deque = deque(maxlen=window_size)
+        self.total = 0
+        self.count = 0
+        self.fmt = fmt
+
+    def update(self, count, total):
+        self.c_deque.append(count)
+        self.t_deque.append(total)
+        self.count += count
+        self.total += total
+
+    def synchronize_between_processes(self):
+        """
+        Warning: does not synchronize the deque!
+        """
+        if not main_util.is_dist_avail_and_initialized():
+            return
+        t = torch.tensor([self.count, self.total], dtype=torch.float64, device='cuda')
+        dist.barrier()
+        dist.all_reduce(t)
+        t = t.tolist()
+        self.count = int(t[0])
+        self.total = t[1]
+
+    @property
+    def median(self):
+        dc = torch.tensor(list(self.c_deque))
+        dt = torch.tensor(list(self.t_deque))
+        d = dc / dt
+        return d.median().item()
+
+    @property
+    def avg(self):
+        dc = torch.tensor(list(self.c_deque), dtype=torch.float32)
+        dt = torch.tensor(list(self.t_deque), dtype=torch.float32)
+        d = dc / dt
+        return d.mean().item()
+
+    @property
+    def global_avg(self):
+        return self.count / self.total
+
+    @property
+    def max(self):
+        dc = torch.tensor(list(self.c_deque), dtype=torch.float32)
+        dt = torch.tensor(list(self.t_deque), dtype=torch.float32)
+        d = dc / dt
+        return max(d)
+
+    @property
+    def value(self):
+        return self.c_deque[-1]
 
     def __str__(self):
         return self.fmt.format(
@@ -73,6 +144,7 @@ class SmoothedValue(object):
 class MetricLogger(object):
     def __init__(self, delimiter="\t"):
         self.meters = defaultdict(SmoothedValue)
+        self.counters = defaultdict(CtrValue)
         self.delimiter = delimiter
 
     def update(self, **kwargs):
@@ -85,6 +157,8 @@ class MetricLogger(object):
     def __getattr__(self, attr):
         if attr in self.meters:
             return self.meters[attr]
+        if attr in self.counters:
+            return self.counters[attr]
         if attr in self.__dict__:
             return self.__dict__[attr]
         raise AttributeError("'{}' object has no attribute '{}'".format(
@@ -101,9 +175,14 @@ class MetricLogger(object):
     def synchronize_between_processes(self):
         for meter in self.meters.values():
             meter.synchronize_between_processes()
+        for counter in self.counters.values():
+            counter.synchronize_between_processes()
 
     def add_meter(self, name, meter):
         self.meters[name] = meter
+
+    def add_counter(self, name, counter):
+        self.counters[name] = counter
 
     def log_every(self, iterable, print_freq, header=None):
         i = 0
