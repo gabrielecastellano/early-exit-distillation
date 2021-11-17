@@ -2,13 +2,14 @@ import torch
 from torch.utils.data import Dataset
 
 
-class CustomDataset(Dataset):
-    """Face Landmarks dataset."""
+class EmbeddingDataset(Dataset):
 
-    def __init__(self, embeddings, labels, n_classes=100, transform=None):
+    def __init__(self, embeddings, labels, confidences, n_classes=None, transform=None):
+        if n_classes is None:
+            n_classes = len(labels)
         self.data = embeddings[labels < n_classes]
         self.targets = labels[labels < n_classes]
-        self.n_classes = n_classes
+        self.confidences = confidences[labels < n_classes]
         self.transform = transform
 
 
@@ -21,9 +22,6 @@ class CustomDataset(Dataset):
 
         embedding = self.data[idx]
         label = self.targets[idx]
-        #target = torch.zeros(self.n_classes)
-        #if label < self.n_classes:
-        #    target[label] = 1
 
         sample = (embedding, label)
 

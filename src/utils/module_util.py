@@ -38,6 +38,7 @@ def get_model(config, device=None):
         raise ValueError('model_type `{}` is not expected'.format(model_type))
     elif device is None:
         return model
+    model.device = device
     return model.to(device)
 
 

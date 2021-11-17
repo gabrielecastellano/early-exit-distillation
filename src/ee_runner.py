@@ -1,6 +1,7 @@
 import argparse
 import datetime
 import json
+import math
 import time
 
 import numpy as np
@@ -8,12 +9,14 @@ import os
 
 import torch
 from pathlib import Path
+
 from torch import distributed as dist
 from torch.backends import cudnn
 from torch.nn import DataParallel
 from torch.nn.parallel.distributed import DistributedDataParallel
 
 import early_classifier.base
+from early_classifier.ee_dataset import EmbeddingDataset
 from early_classifier.ee_utils import iterate_configurations
 from myutils.common import file_util, yaml_util
 from myutils.pytorch import func_util, module_util
@@ -75,6 +78,10 @@ def evaluate(model, data_loader, device, ee_model=None, ee_threshold=0, interval
     if title is not None:
         print(title)
 
+    model = model.to(model.device)
+    if ee_model is not None:
+        ee_model = ee_model.to(ee_model.device)
+
     overall_samples = 50000
     overall_samples_per_class = 500
     used_samples_per_class = 500
@@ -83,6 +90,8 @@ def evaluate(model, data_loader, device, ee_model=None, ee_threshold=0, interval
     num_threads = torch.get_num_threads()
     torch.set_num_threads(1)
     model.eval()
+    if ee_model:
+        ee_model.eval()
     metric_logger = MetricLogger(delimiter='  ')
     metric_logger.add_counter('early_predictions', CtrValue())
     header = '{}:'.format(split_name)
@@ -98,8 +107,8 @@ def evaluate(model, data_loader, device, ee_model=None, ee_threshold=0, interval
             if img_ctr >= samples:
                     break
 
-            image = image.to(device, non_blocking=True)
-            target = target.to(device, non_blocking=True)
+            image = image.to(model.device, non_blocking=True)
+            target = target.to(model.device, non_blocking=True)
 
             if not ee_model:
                 output = model(image)
@@ -107,7 +116,7 @@ def evaluate(model, data_loader, device, ee_model=None, ee_threshold=0, interval
             else:
                 # run model up to bottleneck
                 bn_output = model.forward_to_bn(image)
-                embeddings = bn_output.to(device)
+                embeddings = bn_output.to(ee_model.device)
                 embeddings = embeddings.reshape(embeddings.shape[0], embeddings.shape[1:].numel())
 
                 # early prediction
@@ -119,16 +128,17 @@ def evaluate(model, data_loader, device, ee_model=None, ee_threshold=0, interval
                 # full_predictions = bn_output[ee_output < ee_threshold].gpu()
                 full_predictions = bn_output[ee_conf < ee_threshold]
                 new_early_exits = data_loader.batch_size - full_predictions.shape[0]
+                output = ee_output.to(model.device)
                 # early_exit_ctr += new_early_exits
-                full_output = model.forward_from_bn(full_predictions.to(device))
 
-                # merge early and full predictions
-                output = ee_output
-                j = 0
-                for i in range(len(ee_output)):
-                    if ee_conf[i] < ee_threshold:
-                        output[i] = full_output[j]
-                        j += 1
+                if full_predictions.shape[0] > 0:
+                    full_output = model.forward_from_bn(full_predictions)
+                    # merge early and full predictions
+                    j = 0
+                    for i in range(len(ee_output)):
+                        if ee_conf[i] < ee_threshold:
+                            output[i] = full_output[j]
+                            j += 1
 
             acc1, acc5 = main_util.compute_accuracy(output, target, topk=(1, 5))
             metric_logger.meters['acc1'].update(acc1.item(), n=data_loader.batch_size)
@@ -140,8 +150,8 @@ def evaluate(model, data_loader, device, ee_model=None, ee_threshold=0, interval
     top1_accuracy = metric_logger.acc1.global_avg
     top5_accuracy = metric_logger.acc5.global_avg
     early_predictions = metric_logger.early_predictions.global_avg
-    print(' * Acc@1 {:.4f}\tAcc@5 {:.4f}\n'.format(top1_accuracy, top5_accuracy))
-    print(' * Fraction of early predictions {:.4f}\n'.format(early_predictions))
+    print(' * Acc@1 {:.4f}\tAcc@5 {:.4f}'.format(top1_accuracy, top5_accuracy))
+    print(' * Fraction of early predictions {:.4f}'.format(early_predictions))
     torch.set_num_threads(num_threads)
     return metric_logger.acc1.global_avg
 
@@ -278,17 +288,17 @@ def distill(train_loader, valid_loader, student_input_shape, teacher_input_shape
     del student_model
 
 
-def get_embeddings(data_loader, model, overall_samples, overall_samples_per_class, used_samples_per_class, input_shape, device, interval=10, split_name='EE Train', load_from_storage=False,
-                   store=False, embedding_storage=None):
+def get_embeddings(dataset, model, overall_samples_per_class, used_samples_per_class, input_shape,
+                   device, interval=10, split_name='Get Embeddings', load_from_storage=False, store=False,
+                   embedding_storage=None):
     """
 
     Args:
         split_name:
         input_shape:
         interval:
-        data_loader:
+        dataset:
         model (models.mimic.base.BaseMimic):
-        overall_samples:
         overall_samples_per_class:
         used_samples_per_class:
         device:
@@ -300,14 +310,15 @@ def get_embeddings(data_loader, model, overall_samples, overall_samples_per_clas
     Returns:
 
     """
-
-    samples = int(overall_samples / overall_samples_per_class) * used_samples_per_class
+    overall_samples = len(dataset)
+    n_classes = int(overall_samples / overall_samples_per_class)
+    n_samples = n_classes * used_samples_per_class
     bn_shape = model.head.bn_shape(input_shape, device)
 
-    cache_labels = np.zeros([samples], dtype=int)
-    cache_labels_t = np.zeros([samples], dtype=int)
-    cache_confidences = np.zeros([samples])
-    cache_data = np.zeros([samples, np.prod(bn_shape)], dtype=np.float32)
+    cache_labels = np.zeros([n_samples], dtype=int)
+    cache_labels_t = np.zeros([n_samples], dtype=int)
+    cache_confidences = np.zeros([n_samples])
+    cache_data = np.zeros([n_samples, np.prod(bn_shape)], dtype=np.float32)
 
     metric_logger = MetricLogger(delimiter='  ')
     header = '{}:'.format(split_name)
@@ -328,17 +339,19 @@ def get_embeddings(data_loader, model, overall_samples, overall_samples_per_clas
 
     if not load_from_storage:
         # use the bottlenecked model to produce embeddings
+        data_loader = dataset_util.get_data_loader(dataset, shuffle=False, n_labels=n_classes)
+        model = model.to(model.device)
         num_threads = torch.get_num_threads()
         torch.set_num_threads(1)
         model.eval()
         with torch.no_grad():
             img_ctr_wide = -1
             img_ctr = 0
-            for image, target in metric_logger.log_every(data_loader, interval, header):
+            for image, target in metric_logger.log_every(data_loader, len(data_loader.dataset), header):
                 img_ctr_wide += data_loader.batch_size
                 if img_ctr_wide%overall_samples_per_class >= used_samples_per_class:
                     continue
-                if img_ctr >= samples:
+                if img_ctr >= n_samples:
                     break
 
                 image = image.to(device, non_blocking=True)
@@ -352,7 +365,7 @@ def get_embeddings(data_loader, model, overall_samples, overall_samples_per_clas
                 prediction = list()
                 target_labels = list()
                 predicted_labels = list()
-                for i in range(data_loader.batch_size):
+                for i in range(output.shape[0]):
                     c, p = torch.max(torch.nn.functional.softmax(output[i], dim=0), 0)
                     confidence.append(c)
                     prediction.append(p)
@@ -382,8 +395,21 @@ def save_embeddings_on_storage(cache_data, cache_labels, cache_labels_t, cache_c
     torch.save(cache_confidences, f'{storage_folder}/confidences.sav')
 
 
-def train_ee_model(full_model, ee_config, cache_data, cache_labels, cache_confidences,
-                   used_samples_per_class, valid_loader, device):
+def train_ee_model(mimic_model, ee_config, used_samples_per_class, train_dataset, valid_dataset, device):
+    """
+
+    Args:
+        mimic_model:
+        ee_config:
+        used_samples_per_class: TODO this parameter is ignored
+        train_dataset:
+        valid_dataset:
+        device:
+
+    Returns:
+
+    """
+    mimic_model = mimic_model.to(mimic_model.device)
     ee_type = ee_config['type']
     experiment_name = ee_config['experiment']
     results = dict()
@@ -393,8 +419,12 @@ def train_ee_model(full_model, ee_config, cache_data, cache_labels, cache_confid
 
     for ee_params in configurations:
         label_subset = ee_params['n_labels']
-        samples_subset = used_samples_per_class * label_subset
+        # samples_subset = used_samples_per_class * label_subset
         instance_key = f"{label_subset}:{used_samples_per_class}"
+
+        # Get data loaders
+        train_loader = dataset_util.get_data_loader(train_dataset, shuffle=False, n_labels=label_subset)
+        valid_loader = dataset_util.get_data_loader(valid_dataset, shuffle=False, n_labels=label_subset)
 
         # Initialize early exit model
         ee_model = early_classifier.ee_utils.models[ee_type](**ee_params)
@@ -406,9 +436,9 @@ def train_ee_model(full_model, ee_config, cache_data, cache_labels, cache_confid
         for epoch in range(ee_params['epochs']):
 
             # Train early exit model one epoch
-            ee_model.fit(cache_data[:samples_subset], cache_labels[:samples_subset], cache_confidences[:samples_subset], epoch=epoch)
+            ee_model.fit(train_loader, epoch=epoch)
             # Evaluate early exit model
-            r = evaluate_ee_model(ee_model, full_model, valid_loader, device, use_threshold=True)
+            r = evaluate_ee_model(ee_model, mimic_model, valid_loader, device, use_threshold=True)
 
             results[instance_key].setdefault(ee_model.key_param(), r)
             if r['performance'] >= results[instance_key][ee_model.key_param()]['performance']:
@@ -437,15 +467,15 @@ def train_ee_model(full_model, ee_config, cache_data, cache_labels, cache_confid
     ee_model.save(ee_model_file)
 
     # store results on disk
-    dname = f'ee_stats_{ee_type}/stats'
+    dname = f'ee_stats/{ee_type}/stats'
     Path(dname).mkdir(parents=True, exist_ok=True)
     with open(f"{dname}/{experiment_name}_{time.strftime('%Y%m%d-%H%M%S')}.json", "w") as f:
         json.dump(results, f)
 
-def evaluate_ee_model(ee_model, full_model, data_loader, device, interval=10, split_name='Evaluate EE', use_threshold=True):
+def evaluate_ee_model(ee_model, mimic_model, data_loader, device, interval=100, split_name='Evaluate EE', use_threshold=True):
 
-    # TODO this could be speedup by caching evaluation embeddings
-
+    mimic_model = mimic_model.to(mimic_model.device)
+    ee_model = ee_model.to(ee_model.device)
     metric_logger = MetricLogger(delimiter='  ')
     metric_logger.add_counter('early_predictions', CtrValue())
     metric_logger.add_meter('ee_acc1', SmoothedValue())
@@ -456,22 +486,23 @@ def evaluate_ee_model(ee_model, full_model, data_loader, device, interval=10, sp
     num_threads = torch.get_num_threads()
     torch.set_num_threads(1)
     ee_model.eval()
-    full_model.eval()
+    mimic_model.eval()
 
-    for image, target in metric_logger.log_every(data_loader, interval, header):
-        image = image.to(full_model.device, non_blocking=True)
+    for embeddings, target in metric_logger.log_every(data_loader, interval, header):
+        embeddings = embeddings.to(mimic_model.device, non_blocking=True)
         target = target.to(device, non_blocking=True)
         if any([t > ee_model.n_labels - 1 for t in target]):
             break
 
         # run full model up to bottleneck
-        embeddings = full_model.forward_to_bn(image).to(device)
-        embeddings = embeddings.reshape(embeddings.shape[0], embeddings.shape[1:].numel())
+        # embeddings = mimic_model.forward_to_bn(image).to(device)
+        # embeddings = embeddings.reshape(embeddings.shape[0], embeddings.shape[1:].numel())
 
         # ee prediction
         # predictions, confidences = ee_model.predict(np.array(embeddings))
         # confident_predictions = predictions[confidences < ee_model.get_threshold()]
         # confident_targets = target[confidences < ee_model.get_threshold()]
+        embeddings = embeddings.to(ee_model.device)
         ee_output = ee_model.predict(embeddings)
         ee_conf = ee_model.get_prediction_confidences(ee_output)
         if not use_threshold:
@@ -501,9 +532,13 @@ def evaluate_ee_model(ee_model, full_model, data_loader, device, interval=10, sp
     top5_accuracy_c = metric_logger.ee_acc5_c.global_avg
     early_predictions = metric_logger.early_predictions.global_avg
     # Compute a performance metric that considers both accuracy and percentage of confident predictions
+    def compute_performance_metric(acc, frac, exp):
+        """ The higher exp, the higher the importance given to the accuracy """
+        return (((min(acc, 65) + math.log(max(1, acc - 65))) * 0.01) + 0.5) ** exp * math.log(frac * 100 + 1) * 0.01
     # performance_metric = 1.5 * top1_accuracy_c + 100*early_predictions
     # performance_metric = ((min(top1_accuracy_c, 85)*0.01)**2 + 0.5) * (early_predictions + 0.5)
-    performance_metric = ((min(top1_accuracy_c, 85)*0.01) + 0.5)**5 * early_predictions
+    # performance_metric = ((min(top1_accuracy_c, 85)*0.01) + 0.5)**5 * early_predictions
+    performance_metric = compute_performance_metric(top1_accuracy_c, early_predictions, 3.5)
 
     print(' * OVERALL:\t\tAcc@1 {:.4f}\tAcc@5 {:.4f}'.format(top1_accuracy, top5_accuracy))
     print(' * CONFIDENT:\t\tAcc@1 {:.4f}\tAcc@5 {:.4f}\t(fraction of early predictions {:.4f})'.format(top1_accuracy_c, top5_accuracy_c, early_predictions))
@@ -536,19 +571,22 @@ def run(args):
 
     ee_config = config['ee_model']
     ee_threshold = ee_config['threshold']
+    samples_per_class = ee_config['samples_per_class']
+    used_samples_per_class = ee_config['used_samples_per_class']
     load_embeddings = ee_config['load_embeddings']
     store_embeddings = ee_config['store_embeddings']
     embeddings_storage = ee_config['storage']
 
-    # Build data loaders
-    train_loader, valid_loader, test_loader, ctrain_loader =\
-        dataset_util.get_data_loaders(dataset_config, batch_size=train_config['batch_size'],
-                                      rough_size=int(256/224*teacher_input_shape[-1]),
-                                      reshape_size=teacher_input_shape[1:3],
-                                      test_batch_size=test_config['batch_size'], jpeg_quality=-1,
-                                      distributed=distributed, order_labels=(args.ee_solo_train or args.ee_joint_train))
+    # Build datasets and loaders for full model
+    input_shape = teacher_input_shape if teacher_input_shape[-1] > student_input_shape[-1] else student_input_shape
+    train_dataset, valid_dataset, test_dataset = dataset_util.get_datasets(dataset_config,
+                                                                           reshape_size=input_shape[1:3],
+                                                                           rough_size=int(256/224*input_shape[-1]))
+    train_loader = dataset_util.get_data_loader(train_dataset, shuffle=True, batch_size=train_config['batch_size'])
+    valid_loader = dataset_util.get_data_loader(valid_dataset, shuffle=False, batch_size=test_config['batch_size'])
+    test_loader = dataset_util.get_data_loader(test_dataset, shuffle=False, batch_size=test_config['batch_size'])
 
-    # Train student model through distillation from the teacher model
+    # Train mimic model through distillation from the original model
     if args.bn_train:
         ee_model = None
         if args.ee_joint_train:
@@ -556,33 +594,34 @@ def run(args):
         distill(train_loader, valid_loader, student_input_shape, teacher_input_shape, config, device, distributed,
                 device_ids, ee_model=ee_model, ee_threshold=ee_threshold)
 
-    # Train the early exit model starting for an already trained student model
-    if args.ee_solo_train:
-        samples = len(ctrain_loader.dataset)
-        samples_per_class = ee_config['samples_per_class']
-        used_samples_per_class = ee_config['used_samples_per_class']
+    # Generate embedding datasets
+    org_model, teacher_model_type = mimic_util.get_org_model(teacher_model_config, device)
+    mimic_model = mimic_util.get_mimic_model(config, org_model, teacher_model_type, teacher_model_config, device)
+    cache_data, cache_labels, _, cache_confidences = get_embeddings(train_dataset, mimic_model,
+                                                                    samples_per_class, used_samples_per_class,
+                                                                    student_input_shape, device,
+                                                                    load_from_storage=load_embeddings,
+                                                                    store=store_embeddings,
+                                                                    embedding_storage=embeddings_storage)
+    valid_data, _, valid_labels, valid_confidences = get_embeddings(valid_dataset, mimic_model,
+                                                                    samples_per_class, used_samples_per_class,
+                                                                    student_input_shape, device,
+                                                                    load_from_storage=False,
+                                                                    store=False)
+    ee_train_dataset = EmbeddingDataset(cache_data, cache_labels, cache_confidences)
+    ee_valid_dataset = EmbeddingDataset(valid_data, valid_labels, valid_confidences)
 
-        org_model, teacher_model_type = mimic_util.get_org_model(teacher_model_config, device)
-        mimic_model = mimic_util.get_mimic_model(config, org_model, teacher_model_type, teacher_model_config, device)
-        cache_data, cache_labels, _, cache_confidences = get_embeddings(ctrain_loader, mimic_model, samples,
-                                                                        samples_per_class, used_samples_per_class,
-                                                                        student_input_shape, device,
-                                                                        load_from_storage=load_embeddings,
-                                                                        store=store_embeddings,
-                                                                        embedding_storage=embeddings_storage)
-        # TODO directly build data loaders (both train and test) here using the cache data
-        train_ee_model(mimic_model, ee_config, cache_data, cache_labels, cache_confidences,
-                       used_samples_per_class, valid_loader, device)
+    # Train the early exit model starting from an already trained student model
+    if args.ee_solo_train:
+        train_ee_model(mimic_model, ee_config, used_samples_per_class, ee_train_dataset, ee_valid_dataset, device)
 
     # Test original model
-    org_model, teacher_model_type = mimic_util.get_org_model(teacher_model_config, device)
     if args.org_eval:
         if distributed:
             org_model = DataParallel(org_model, device_ids=device_ids)
         evaluate(org_model, test_loader, device, title='[Original model]')
 
     # Test mimic model
-    mimic_model = mimic_util.get_mimic_model(config, org_model, teacher_model_type, teacher_model_config, device)
     mimic_model_without_dp = mimic_model.module if isinstance(mimic_model, DataParallel) else mimic_model
     if args.bn_eval:
         if distributed:
@@ -591,7 +630,8 @@ def run(args):
 
     # Test early exit model
     ee_model = ee_utils.get_ee_model(ee_config, device, pre_trained=True)
-    evaluate_ee_model(ee_model, mimic_model, valid_loader, device)
+    ee_valid_loader = dataset_util.get_data_loader(ee_valid_dataset, shuffle=False, n_labels=ee_model.n_labels)
+    evaluate_ee_model(ee_model, mimic_model, ee_valid_loader, device)
 
     # Joint test mimic model with early exit model
     file_util.save_pickle(mimic_model_without_dp, config['mimic_model']['ckpt'])

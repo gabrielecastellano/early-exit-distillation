@@ -1,10 +1,12 @@
+import copy
 import multiprocessing
 
 import os
 import random
 
+import numpy as np
 import torch
-from torch.utils.data import DataLoader, RandomSampler, SequentialSampler
+from torch.utils.data import DataLoader, RandomSampler, SequentialSampler, Dataset
 from torch.utils.data.distributed import DistributedSampler
 import torchvision
 from torch.utils.data.sampler import Sampler
@@ -131,6 +133,94 @@ def get_data_loaders(dataset_config, batch_size=100, compression_type=None, comp
     ctrain_loader = DataLoader(ctrain_dataset, batch_size=batch_size, sampler=ctrain_sampler,
                              num_workers=num_workers, pin_memory=pin_memory)
     return train_loader, valid_loader, test_loader, ctrain_loader
+
+
+def get_datasets(dataset_config, compression_type=None, compressed_size=None, normalized=True, rough_size=None,
+                 reshape_size=(224, 224), jpeg_quality=0):
+    data_config = dataset_config['data']
+    dataset_name = dataset_config['name']
+    train_file_path = data_config['train']
+    valid_file_path = data_config['valid']
+    test_file_path = data_config['test']
+    normalizer_config = dataset_config['normalizer']
+    mean = normalizer_config['mean']
+    std = normalizer_config['std']
+
+    if dataset_name == 'cifar100':
+        transform_train = transforms.Compose([
+            #transforms.RandomResizedCrop(reshape_size[0]),
+            transforms.Resize(rough_size),
+            transforms.RandomCrop(reshape_size),
+            transforms.RandomHorizontalFlip(),
+            transforms.ToTensor(),
+            transforms.Normalize(mean, std)
+        ])
+        transform_val = transforms.Compose([
+            transforms.Resize(reshape_size),
+            # transforms.CenterCrop(reshape_size[0]),
+            transforms.ToTensor(),
+            transforms.Normalize(mean, std)
+        ])
+        transform_test = transforms.Compose([
+            transforms.Resize(rough_size),
+            transforms.CenterCrop(reshape_size),
+            transforms.ToTensor(),
+            transforms.Normalize(mean, std)
+        ])
+        train_dataset = torchvision.datasets.CIFAR100(root=os.path.expanduser('~/dataset'), train=True, download=True,
+                                                          transform=transform_train)
+        test_dataset = torchvision.datasets.CIFAR100(root=os.path.expanduser('~/dataset'), train=False, download=True,
+                                                      transform=transform_val)
+        valid_dataset = torchvision.datasets.CIFAR100(root=os.path.expanduser('~/dataset'), train=False, download=True,
+                                                      transform=transform_val)
+    else:
+        train_dataset = AdvRgbImageDataset(train_file_path, reshape_size)
+        normalizer = data_util.build_normalizer(train_dataset.load_all_data() if mean is None or std is None else None,
+                                                mean, std) if normalized else None
+        train_comp_list = [transforms.Resize(rough_size), transforms.RandomCrop(reshape_size)]\
+            if rough_size is not None else list()
+        train_comp_list.extend([transforms.RandomHorizontalFlip(), transforms.ToTensor()])
+        valid_comp_list = [transforms.ToTensor()]
+        if normalizer is not None:
+            train_comp_list.append(normalizer)
+            valid_comp_list.append(normalizer)
+
+        train_transformer = transforms.Compose(train_comp_list)
+        valid_transformer = transforms.Compose(valid_comp_list)
+        test_transformer = get_test_transformer(dataset_name, normalizer, compression_type, compressed_size, reshape_size)
+        train_dataset = AdvRgbImageDataset(train_file_path, reshape_size, train_transformer)
+        eval_reshape_size = rough_size if dataset_name == 'imagenet' else reshape_size
+        if dataset_name == 'imagenet':
+            valid_transformer = test_transformer
+
+        valid_dataset = AdvRgbImageDataset(valid_file_path, eval_reshape_size, valid_transformer)
+        test_dataset = AdvRgbImageDataset(test_file_path, eval_reshape_size, test_transformer, jpeg_quality)
+
+    return train_dataset, valid_dataset, test_dataset
+
+
+def get_data_loader(dataset, shuffle=False, n_labels=None, batch_size=64):
+    """
+
+    Args:
+        dataset (Dataset):
+        shuffle (Bool):
+        n_labels (int):
+        batch_size (int):
+
+    Returns (DataLoader):
+
+    """
+    sub_dataset = copy.copy(dataset)
+    if n_labels is not None:
+        dataset.targets = np.array(dataset.targets)
+        sub_dataset.targets = np.array(sub_dataset.targets)
+        sub_dataset.targets = sub_dataset.targets[dataset.targets < n_labels]
+        sub_dataset.data = sub_dataset.data[dataset.targets < n_labels]
+
+    sampler = RandomSampler(sub_dataset) if shuffle else SequentialSampler(sub_dataset)
+    pin_memory = torch.cuda.is_available()
+    return DataLoader(sub_dataset, batch_size=batch_size, sampler=sampler, pin_memory=pin_memory)
 
 
 class PerLabelSampler(Sampler):

@@ -5,6 +5,7 @@ import torch
 from sklearn.cluster import KMeans
 
 from early_classifier.base import BaseClassifier
+from early_classifier.ee_dataset import EmbeddingDataset
 
 
 class KMeansClassifier(BaseClassifier):
@@ -22,7 +23,20 @@ class KMeansClassifier(BaseClassifier):
         self.valid_shares = None
         self.share_threshold = 0
 
-    def fit(self, x, y, c, epoch=0):
+    def fit(self, data_loader, epoch=0):
+        """
+
+        Args:
+            data_loader (DataLoader):
+            epoch:
+
+        """
+        if type(data_loader.dataset) != EmbeddingDataset:
+           raise TypeError(f"Unexpected dataset type '{type(data_loader.dataset)}'")
+        x = data_loader.dataset.data
+        y = data_loader.dataset.targets
+        c = data_loader.dataset.confidences
+
         # clustering
         self.model.fit(x)
 
@@ -114,3 +128,7 @@ class KMeansClassifier(BaseClassifier):
 
     def eval(self):
         pass
+
+    def to(self, device):
+        self.device = device
+        return self

@@ -76,7 +76,7 @@ class BaseMimic(nn.Module):
         if self.head is not None:
             zs = self.head(zs)
         zs = self.tail(zs)
-        return self.classifier(zs.view(zs.size(0), -1))
+        return self.classifier(zs.view(zs.size(0), 0 if zs.size(0) == 0 else -1))
 
     def forward_to_bn(self, sample_batch):
         return self.head.forward_to_bn(sample_batch)
@@ -84,7 +84,7 @@ class BaseMimic(nn.Module):
     def forward_from_bn(self, sample_batch):
         zs = self.head.forward_from_bn(sample_batch)
         zs = self.tail(zs)
-        return self.classifier(zs.view(zs.size(0), -1))
+        return self.classifier(zs.view(zs.size(0), 0 if zs.size(0) == 0 else -1))
 
     @property
     def out_features(self):

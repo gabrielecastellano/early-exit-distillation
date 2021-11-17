@@ -4,13 +4,11 @@ class BaseClassifier:
         self.device = device
         self.n_labels = n_labels
 
-    def fit(self, x, y, c, epoch=0):
+    def fit(self, data_loader, epoch=0):
         """
 
         Args:
-            x (Tensor): array containing the data to fit
-            y (Tensor): array containing the labels to fit
-            c (Tensor): array of confidence values for the labels in y
+            data_loader (torch.utils.data.dataloader.DataLoader): data to fit
             epoch:
 
         Returns:
@@ -61,4 +59,7 @@ class BaseClassifier:
         raise NotImplementedError('predict method must be implemented')
 
     def eval(self):
+        raise NotImplementedError('predict method must be implemented')
+
+    def to(self, device):
         raise NotImplementedError('predict method must be implemented')

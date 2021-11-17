@@ -3,7 +3,7 @@ import torch
 from torch.utils.data import Dataset, RandomSampler
 
 from early_classifier.base import BaseClassifier
-from early_classifier.ee_dataset import CustomDataset
+from early_classifier.ee_dataset import EmbeddingDataset
 from structure.logger import MetricLogger
 from myutils.pytorch import func_util
 
@@ -24,17 +24,12 @@ class LinearClassifier(BaseClassifier):
         self.batch_size = batch_size
         self.threshold = threshold
 
-    def fit(self, x, y, c, epoch=0):
-
-        train_dataset = CustomDataset(x, y, n_classes=self.n_labels)
-        # train_sampler = PerLabelSampler(train_dataset, shuffle=True)
-        train_sampler = RandomSampler(train_dataset)
-        train_loader = torch.utils.data.DataLoader(train_dataset, batch_size=self.batch_size, sampler=train_sampler)
+    def fit(self, data_loader, epoch=0):
 
         metric_logger = MetricLogger(delimiter='  ')
         header = 'TRAIN EE (LINEAR): epoch {}'.format(epoch)
         self.model.train()
-        for sample_batch, targets in metric_logger.log_every(train_loader, 100, header=header):
+        for sample_batch, targets in metric_logger.log_every(data_loader, len(data_loader.dataset), header=header):
             sample_batch, targets = sample_batch.to(self.device), targets.to(self.device)
             self.optimizer.zero_grad()
             outputs = self.model.forward(sample_batch)
@@ -85,7 +80,7 @@ class LinearClassifier(BaseClassifier):
         self.embedding_size = model_dict['embedding_size']
         self.n_labels = model_dict['n_labels']
         self.device = model_dict['device']
-        self.model = torch.nn.Linear(self.embedding_size, self.n_labels).to(self.device)
+        self.model.load_state_dict(model_dict['model'])
         self.n_labels = model_dict['n_labels']
         self.batch_size = model_dict['batch_size']
         self.threshold = model_dict['threshold']
@@ -100,3 +95,8 @@ class LinearClassifier(BaseClassifier):
 
     def eval(self):
         self.model.eval()
+
+    def to(self, device):
+        self.device = device
+        self.model = self.model.to(device)
+        return self

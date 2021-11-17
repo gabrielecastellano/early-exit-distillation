@@ -119,7 +119,7 @@ class CtrValue(object):
 
     @property
     def global_avg(self):
-        return self.count / self.total
+        return self.count / self.total if self.total else 0
 
     @property
     def max(self):
@@ -130,7 +130,7 @@ class CtrValue(object):
 
     @property
     def value(self):
-        return self.c_deque[-1]
+        return self.c_deque[-1] if self.total else 0
 
     def __str__(self):
         return self.fmt.format(
@@ -217,9 +217,11 @@ class MetricLogger(object):
             data_time.update(time.time() - end)
             yield obj
             iter_time.update(time.time() - end)
-            if i % print_freq == 0:
+            if i % print_freq == 0 or i == len(iterable) - 1:
                 eta_seconds = iter_time.global_avg * (len(iterable) - i)
                 eta_string = str(datetime.timedelta(seconds=int(eta_seconds)))
+                if i == len(iterable) - 1:
+                    i = len(iterable)
                 if torch.cuda.is_available():
                     print(log_msg.format(
                         i, len(iterable), eta=eta_string,
