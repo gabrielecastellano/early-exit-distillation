@@ -36,11 +36,11 @@ ee_model:
     type: &eemodel_type 'kmeans'
     experiment: &ee_experiment !join [*dataset_name, '-', *mmodel_type, '-ver', *ver, '-', *bottleneck_channels, 'ch', '-', *eemodel_type]
     params:
-        labels_subsets: [5, 10, 20, 50, 100]
-        clusters_per_labels: [1, 2, 3, 4, 5, 6, 7, 8]
+        labels_subsets: [5]  # [5, 10, 20, 50, 100]
+        clusters_per_labels: [4] # [1, 2, 3, 4, 5, 6, 7, 8]
     threshold: 'auto'
-    load_embeddings: False
-    store_embeddings: True
+    load_embeddings: True
+    store_embeddings: False
     storage: !join ['./resource/embeddings/', *dataset_name, '-', *mmodel_type, '-ver', *ver, '-', *bottleneck_channels, 'ch']
     samples_per_class: 500
     used_samples_per_class: 500

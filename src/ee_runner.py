@@ -339,7 +339,7 @@ def get_embeddings(dataset, model, overall_samples_per_class, used_samples_per_c
 
     if not load_from_storage:
         # use the bottlenecked model to produce embeddings
-        data_loader = dataset_util.get_data_loader(dataset, shuffle=False, n_labels=n_classes)
+        data_loader = dataset_util.get_loader(dataset, shuffle=False, n_labels=n_classes)
         model = model.to(model.device)
         num_threads = torch.get_num_threads()
         torch.set_num_threads(1)
@@ -418,22 +418,24 @@ def train_ee_model(mimic_model, ee_config, used_samples_per_class, train_dataset
     configurations = iterate_configurations(ee_type, ee_config['params'], device, ee_config['threshold'])
 
     for ee_params in configurations:
-        label_subset = ee_params['n_labels']
+        n_labels = ee_params['n_labels']
         # samples_subset = used_samples_per_class * label_subset
-        instance_key = f"{label_subset}:{used_samples_per_class}"
-
-        # Get data loaders
-        train_loader = dataset_util.get_data_loader(train_dataset, shuffle=False, n_labels=label_subset)
-        valid_loader = dataset_util.get_data_loader(valid_dataset, shuffle=False, n_labels=label_subset)
+        instance_key = f"{n_labels}:{used_samples_per_class}"
 
         # Initialize early exit model
         ee_model = early_classifier.ee_utils.models[ee_type](**ee_params)
+
+        # Get data loaders
+        pin_memory = 'cuda' in ee_model.device.type
+        train_loader = dataset_util.get_loader(train_dataset, shuffle=False, n_labels=n_labels, pin_memory=pin_memory)
+        valid_loader = dataset_util.get_loader(valid_dataset, shuffle=False, n_labels=n_labels, pin_memory=pin_memory)
 
         results.setdefault(instance_key, dict())
         best_ee_model.setdefault(instance_key, dict())
 
         print(f"Fitting early exit model of type '{ee_type}' with parameters '{ee_params}'...")
-        for epoch in range(ee_params['epochs']):
+        epochs = ee_params['epochs'] if 'epochs' in ee_params else 1
+        for epoch in range(epochs):
 
             # Train early exit model one epoch
             ee_model.fit(train_loader, epoch=epoch)
@@ -457,13 +459,13 @@ def train_ee_model(mimic_model, ee_config, used_samples_per_class, train_dataset
 
     # store best model for last configuration
     ee_params = configurations[-1]
-    label_subset = ee_params['n_labels']
-    instance_key = f"{label_subset}:{used_samples_per_class}"
+    n_labels = ee_params['n_labels']
+    instance_key = f"{n_labels}:{used_samples_per_class}"
     ee_model = early_classifier.ee_utils.models[ee_type](**ee_params)
     ee_model.from_state_dict(best_ee_model[instance_key][ee_model.key_param()])
     dname = ee_config['ckpt']
     Path(dname).mkdir(parents=True, exist_ok=True)
-    ee_model_file = dname.format(label_subset, used_samples_per_class, ee_model.key_param())
+    ee_model_file = dname.format(n_labels, used_samples_per_class, ee_model.key_param())
     ee_model.save(ee_model_file)
 
     # store results on disk
@@ -505,6 +507,9 @@ def evaluate_ee_model(ee_model, mimic_model, data_loader, device, interval=100, 
         embeddings = embeddings.to(ee_model.device)
         ee_output = ee_model.predict(embeddings)
         ee_conf = ee_model.get_prediction_confidences(ee_output)
+        ee_output = ee_output.to(device)
+        ee_conf = ee_conf.to(device)
+
         if not use_threshold:
             confidence_threshold = 0.2
         else:
@@ -576,15 +581,17 @@ def run(args):
     load_embeddings = ee_config['load_embeddings']
     store_embeddings = ee_config['store_embeddings']
     embeddings_storage = ee_config['storage']
+    ee_device = torch.device('cpu')
 
     # Build datasets and loaders for full model
     input_shape = teacher_input_shape if teacher_input_shape[-1] > student_input_shape[-1] else student_input_shape
     train_dataset, valid_dataset, test_dataset = dataset_util.get_datasets(dataset_config,
                                                                            reshape_size=input_shape[1:3],
                                                                            rough_size=int(256/224*input_shape[-1]))
-    train_loader = dataset_util.get_data_loader(train_dataset, shuffle=True, batch_size=train_config['batch_size'])
-    valid_loader = dataset_util.get_data_loader(valid_dataset, shuffle=False, batch_size=test_config['batch_size'])
-    test_loader = dataset_util.get_data_loader(test_dataset, shuffle=False, batch_size=test_config['batch_size'])
+    pin_memory = 'cuda' in device.type
+    train_loader = dataset_util.get_loader(train_dataset, shuffle=True, batch_size=train_config['batch_size'], pin_memory=pin_memory)
+    valid_loader = dataset_util.get_loader(valid_dataset, shuffle=False, batch_size=test_config['batch_size'], pin_memory=pin_memory)
+    test_loader = dataset_util.get_loader(test_dataset, shuffle=False, batch_size=test_config['batch_size'], pin_memory=pin_memory)
 
     # Train mimic model through distillation from the original model
     if args.bn_train:
@@ -613,7 +620,7 @@ def run(args):
 
     # Train the early exit model starting from an already trained student model
     if args.ee_solo_train:
-        train_ee_model(mimic_model, ee_config, used_samples_per_class, ee_train_dataset, ee_valid_dataset, device)
+        train_ee_model(mimic_model, ee_config, used_samples_per_class, ee_train_dataset, ee_valid_dataset, ee_device)
 
     # Test original model
     if args.org_eval:
@@ -630,8 +637,8 @@ def run(args):
 
     # Test early exit model
     ee_model = ee_utils.get_ee_model(ee_config, device, pre_trained=True)
-    ee_valid_loader = dataset_util.get_data_loader(ee_valid_dataset, shuffle=False, n_labels=ee_model.n_labels)
-    evaluate_ee_model(ee_model, mimic_model, ee_valid_loader, device)
+    ee_valid_loader = dataset_util.get_loader(ee_valid_dataset, shuffle=False, n_labels=ee_model.n_labels)
+    evaluate_ee_model(ee_model, mimic_model, ee_valid_loader, ee_device)
 
     # Joint test mimic model with early exit model
     file_util.save_pickle(mimic_model_without_dp, config['mimic_model']['ckpt'])

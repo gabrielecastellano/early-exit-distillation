@@ -199,7 +199,7 @@ def get_datasets(dataset_config, compression_type=None, compressed_size=None, no
     return train_dataset, valid_dataset, test_dataset
 
 
-def get_data_loader(dataset, shuffle=False, n_labels=None, batch_size=64):
+def get_loader(dataset, shuffle=False, n_labels=None, batch_size=64, pin_memory=False):
     """
 
     Args:
@@ -207,6 +207,7 @@ def get_data_loader(dataset, shuffle=False, n_labels=None, batch_size=64):
         shuffle (Bool):
         n_labels (int):
         batch_size (int):
+        pin_memory (Bool):
 
     Returns (DataLoader):
 
@@ -219,7 +220,6 @@ def get_data_loader(dataset, shuffle=False, n_labels=None, batch_size=64):
         sub_dataset.data = sub_dataset.data[dataset.targets < n_labels]
 
     sampler = RandomSampler(sub_dataset) if shuffle else SequentialSampler(sub_dataset)
-    pin_memory = torch.cuda.is_available()
     return DataLoader(sub_dataset, batch_size=batch_size, sampler=sampler, pin_memory=pin_memory)
 
 

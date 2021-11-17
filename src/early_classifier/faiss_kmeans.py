@@ -1,20 +1,20 @@
-import joblib
 import numpy as np
 import torch
-
-from sklearn.cluster import KMeans
+import faiss
 
 from early_classifier.base import BaseClassifier
 from early_classifier.ee_dataset import EmbeddingDataset
 
 
-class KMeansClassifier(BaseClassifier):
+class FaissKMeansClassifier(BaseClassifier):
 
 
-    def __init__(self, n_labels, k, threshold=0):
-        super().__init__(torch.device('cpu'), n_labels)
+    def __init__(self, device, n_labels, k, dim, niter=10, threshold=0):
+        super().__init__(device, n_labels)
         self.k = k
-        self.model = KMeans(n_clusters=self.k)
+        self.dim = dim
+        self.niter = niter
+        self.model = faiss.Kmeans(self.dim, self.k, niter=self.niter, gpu='cuda' in device.type)
         self.label_share = np.zeros([self.k, n_labels], dtype=int)
         self.confidence_share = {cluster: {label: [] for label in range(n_labels)} for cluster in range(self.k)}
         self.max_labels = np.zeros(self.k, dtype=int)
@@ -22,6 +22,7 @@ class KMeansClassifier(BaseClassifier):
         self.cluster_sizes = np.zeros(self.k, dtype=int)
         self.valid_shares = None
         self.share_threshold = threshold
+        self.distances_q = None
 
     def fit(self, data_loader, epoch=0):
         """
@@ -32,16 +33,18 @@ class KMeansClassifier(BaseClassifier):
 
         """
         if type(data_loader.dataset) != EmbeddingDataset:
-           raise TypeError(f"Unexpected dataset type '{type(data_loader.dataset)}'")
+            raise TypeError(f"Unexpected dataset type '{type(data_loader.dataset)}'")
         x = data_loader.dataset.data
         y = data_loader.dataset.targets
         c = data_loader.dataset.confidences
 
         # clustering
-        self.model.fit(x)
+        self.model.train(x)
 
         # predict on the training set
-        clusters = self.model.predict(x)
+        centroid_distances, clusters = self.model.assign(x)
+        norm_distances = centroid_distances / centroid_distances.max()
+        self.distances_q = np.percentile(norm_distances, (0, 0.25, 0.5, 0.75, 1))
 
         # compute per-cluster shares
         for cluster, target, confidence in zip(clusters, y, c):
@@ -67,15 +70,19 @@ class KMeansClassifier(BaseClassifier):
             self.share_threshold = np.quantile(self.valid_shares, 0.5)
 
     def predict(self, x):
-        x = x.cpu().detach().numpy()
+
         # TODO is it possible to work directly with tensors?
-        y = torch.zeros((x.shape[0], self.n_labels))
-        predicted_clusters = self.model.predict(x)
+        x = x.cpu().detach().numpy()
+        y = np.zeros((x.shape[0], self.n_labels))
+        centroid_distances, predicted_clusters = self.model.assign(x)
+        norm_distances = centroid_distances / centroid_distances.max()
+
         for i, cluster in enumerate(predicted_clusters):
             if cluster != -1:
                 # Naive confidence: fraction of label shares in the cluster
                 y[i][self.max_labels[cluster]] = self.shares[cluster]
-        return y.to(self.device)
+        y = torch.tensor(y, device=self.device)
+        return y
 
     def get_prediction_confidences(self, y):
         return torch.max(y, -1)[0]
@@ -94,35 +101,48 @@ class KMeansClassifier(BaseClassifier):
 
     def to_state_dict(self):
         model_dict = dict({
-            'model': self.model,
+            'centroids': self.model.centroids,
+            'type': 'faiss_kmeans',
+            'k': self.k,
+            'dim': self.dim,
+            'niter': self.niter,
+            'device': self.device,
+            'n_labels': self.n_labels,
+            'index': faiss.serialize_index(self.model.index),
             'metadata': {
-                'type': 'kmeans',
-                'k': self.k,
                 'max_labels': self.max_labels,
                 'shares': self.shares,
                 'valid_shares': self.valid_shares,
-                'share_threshold': self.share_threshold
+                'share_threshold': self.share_threshold,
+                'distances_q': self.distances_q
             }
         })
         return  model_dict
 
 
     def from_state_dict(self, model_dict):
-        if model_dict['metadata']['type'] != 'kmeans':
-            raise TypeError("Expected model type 'kmeans'.")
-        self.model = model_dict['model']
-        self.k = model_dict['metadata']['k']
+
+        if model_dict['type'] != 'faiss_kmeans':
+            raise TypeError("Expected model type 'faiss_kmeans'.")
+        self.k = model_dict['k']
+        self.dim = model_dict['dim']
+        self.niter = model_dict['niter']
+        self.device = model_dict['device']
+        self.model = faiss.Kmeans(self.dim, self.k, gpu='cuda' in self.device.type)
+        self.model.centroids = model_dict['centroids']
+        self.model.index = faiss.deserialize_index(model_dict['index'])
         self.max_labels = model_dict['metadata']['max_labels']
         self.shares = model_dict['metadata']['shares']
         self.valid_shares = model_dict['metadata']['valid_shares']
         self.share_threshold = model_dict['metadata']['share_threshold']
+        self.distances_q = model_dict['metadata']['distances_q']
 
     def save(self, filename):
         model_dict = self.to_state_dict()
-        joblib.dump(model_dict, open(filename, 'wb'))
+        np.save(f"{filename}.npy", model_dict)
 
     def load(self, filename):
-        model_dict = joblib.load(filename)
+        model_dict = np.load(f"{filename}.npy", allow_pickle=True).item()
         self.from_state_dict(model_dict)
 
     def eval(self):
@@ -130,4 +150,5 @@ class KMeansClassifier(BaseClassifier):
 
     def to(self, device):
         self.device = device
+        self.model.gpu = 'cuda' in device.type
         return self
