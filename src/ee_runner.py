@@ -190,20 +190,19 @@ def distill_one_epoch(student_model, teacher_model, teacher_input_size, student_
     metric_logger.add_meter('lr', SmoothedValue(window_size=1, fmt='{value}'))
     metric_logger.add_meter('img/s', SmoothedValue(window_size=10, fmt='{value}'))
     header = 'Epoch: [{}]'.format(epoch)
-    # TODO check if this preserves the accuracy of the teacher model
-    upsampler = torch.nn.Upsample(student_input_size).to(device)
+    # TODO check if this preserves the accuracy of the models
+    student_upsampler = torch.nn.Upsample(student_input_size).to(device)
+    teacher_upsampler = torch.nn.Upsample(teacher_input_size).to(device)
     for sample_batch, targets in metric_logger.log_every(train_loader, interval, header):
         start_time = time.time()
         sample_batch, targets = sample_batch.to(device), targets.to(device)
         optimizer.zero_grad()
-        teacher_outputs = teacher_model(sample_batch)
-        if teacher_input_size != student_input_size:
-            sample_batch = upsampler.forward(sample_batch)
+        teacher_outputs = teacher_model(teacher_upsampler(sample_batch))
         if ee_model:
-            embedding = student_model.forward_to_bn(sample_batch)
+            embedding = student_model.forward_to_bn(student_upsampler(sample_batch))
             student_outputs = student_model.forward_from_bn(embedding)
         else:
-            student_outputs = student_model(sample_batch)
+            student_outputs = student_model(student_upsampler(sample_batch))
         # TODO use the embedding for joint training (loss should be affected by early classification)
         loss = criterion(student_outputs, teacher_outputs)
 
@@ -580,7 +579,7 @@ def run(args):
     load_embeddings = ee_config['load_embeddings']
     store_embeddings = ee_config['store_embeddings']
     embeddings_storage = ee_config['storage']
-    ee_device = torch.device('cpu')
+    ee_device = torch.device(ee_config['device'] if torch.cuda.is_available() else 'cpu')
 
     # Build datasets and loaders for full model
     input_shape = teacher_input_shape if teacher_input_shape[-1] > student_input_shape[-1] else student_input_shape
