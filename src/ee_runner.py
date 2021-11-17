@@ -288,37 +288,36 @@ def distill(train_loader, valid_loader, student_input_shape, teacher_input_shape
     del student_model
 
 
-def get_embeddings(dataset, model, overall_samples_per_class, used_samples_per_class, input_shape,
-                   device, interval=10, split_name='Get Embeddings', load_from_storage=False, store=False,
-                   embedding_storage=None):
+def get_embeddings(dataset, model, input_shape, device, fraction_of_samples=1.0, interval=10, split_name='Get Embeddings',
+                   load_from_storage=False, store=False, embedding_storage=None):
     """
 
     Args:
-        split_name:
-        input_shape:
-        interval:
         dataset:
         model (models.mimic.base.BaseMimic):
-        overall_samples_per_class:
-        used_samples_per_class:
+        input_shape:
         device:
+        fraction_of_samples:
+        interval:
+        split_name:
         load_from_storage:
         store:
         embedding_storage:
-
 
     Returns:
 
     """
     overall_samples = len(dataset)
-    n_classes = int(overall_samples / overall_samples_per_class)
-    n_samples = n_classes * used_samples_per_class
+    overall_classes = max(dataset.targets) + 1
+    overall_samples_per_class = overall_samples / overall_classes
+    used_samples_per_class = int(fraction_of_samples * overall_samples_per_class)
+    used_samples = overall_classes * used_samples_per_class
     bn_shape = model.head.bn_shape(input_shape, device)
 
-    cache_labels = np.zeros([n_samples], dtype=int)
-    cache_labels_t = np.zeros([n_samples], dtype=int)
-    cache_confidences = np.zeros([n_samples])
-    cache_data = np.zeros([n_samples, np.prod(bn_shape)], dtype=np.float32)
+    cache_labels = np.zeros([used_samples], dtype=int)
+    cache_labels_t = np.zeros([used_samples], dtype=int)
+    cache_confidences = np.zeros([used_samples])
+    cache_data = np.zeros([used_samples, np.prod(bn_shape)], dtype=np.float32)
 
     metric_logger = MetricLogger(delimiter='  ')
     header = '{}:'.format(split_name)
@@ -339,7 +338,7 @@ def get_embeddings(dataset, model, overall_samples_per_class, used_samples_per_c
 
     if not load_from_storage:
         # use the bottlenecked model to produce embeddings
-        data_loader = dataset_util.get_loader(dataset, shuffle=False, n_labels=n_classes)
+        data_loader = dataset_util.get_loader(dataset, shuffle=False, order_labels=True, n_labels=overall_classes)
         model = model.to(model.device)
         num_threads = torch.get_num_threads()
         torch.set_num_threads(1)
@@ -351,7 +350,7 @@ def get_embeddings(dataset, model, overall_samples_per_class, used_samples_per_c
                 img_ctr_wide += data_loader.batch_size
                 if img_ctr_wide%overall_samples_per_class >= used_samples_per_class:
                     continue
-                if img_ctr >= n_samples:
+                if img_ctr >= used_samples:
                     break
 
                 image = image.to(device, non_blocking=True)
@@ -395,13 +394,13 @@ def save_embeddings_on_storage(cache_data, cache_labels, cache_labels_t, cache_c
     torch.save(cache_confidences, f'{storage_folder}/confidences.sav')
 
 
-def train_ee_model(mimic_model, ee_config, used_samples_per_class, train_dataset, valid_dataset, device):
+def train_ee_model(mimic_model, ee_config, samples_fraction_per_class, train_dataset, valid_dataset, device):
     """
 
     Args:
         mimic_model:
         ee_config:
-        used_samples_per_class: TODO this parameter is ignored
+        samples_fraction_per_class: TODO this parameter is ignored
         train_dataset:
         valid_dataset:
         device:
@@ -411,6 +410,7 @@ def train_ee_model(mimic_model, ee_config, used_samples_per_class, train_dataset
     """
     mimic_model = mimic_model.to(mimic_model.device)
     ee_type = ee_config['type']
+    shuffle = ee_config['shuffle_train_set']
     experiment_name = ee_config['experiment']
     results = dict()
     best_ee_model = dict()
@@ -420,14 +420,14 @@ def train_ee_model(mimic_model, ee_config, used_samples_per_class, train_dataset
     for ee_params in configurations:
         n_labels = ee_params['n_labels']
         # samples_subset = used_samples_per_class * label_subset
-        instance_key = f"{n_labels}:{used_samples_per_class}"
+        instance_key = f"{n_labels}:{samples_fraction_per_class}"
 
         # Initialize early exit model
         ee_model = early_classifier.ee_utils.models[ee_type](**ee_params)
 
         # Get data loaders
         pin_memory = 'cuda' in ee_model.device.type
-        train_loader = dataset_util.get_loader(train_dataset, shuffle=False, n_labels=n_labels, pin_memory=pin_memory)
+        train_loader = dataset_util.get_loader(train_dataset, shuffle=shuffle, n_labels=n_labels, pin_memory=pin_memory)
         valid_loader = dataset_util.get_loader(valid_dataset, shuffle=False, n_labels=n_labels, pin_memory=pin_memory)
 
         results.setdefault(instance_key, dict())
@@ -460,12 +460,12 @@ def train_ee_model(mimic_model, ee_config, used_samples_per_class, train_dataset
     # store best model for last configuration
     ee_params = configurations[-1]
     n_labels = ee_params['n_labels']
-    instance_key = f"{n_labels}:{used_samples_per_class}"
+    instance_key = f"{n_labels}:{samples_fraction_per_class}"
     ee_model = early_classifier.ee_utils.models[ee_type](**ee_params)
     ee_model.from_state_dict(best_ee_model[instance_key][ee_model.key_param()])
     dname = ee_config['ckpt']
     Path(dname).mkdir(parents=True, exist_ok=True)
-    ee_model_file = dname.format(n_labels, used_samples_per_class, ee_model.key_param())
+    ee_model_file = dname.format(n_labels, samples_fraction_per_class, ee_model.key_param())
     ee_model.save(ee_model_file)
 
     # store results on disk
@@ -576,8 +576,7 @@ def run(args):
 
     ee_config = config['ee_model']
     ee_threshold = ee_config['threshold']
-    samples_per_class = ee_config['samples_per_class']
-    used_samples_per_class = ee_config['used_samples_per_class']
+    fraction_of_samples_per_class = ee_config['samples_fraction']
     load_embeddings = ee_config['load_embeddings']
     store_embeddings = ee_config['store_embeddings']
     embeddings_storage = ee_config['storage']
@@ -605,14 +604,14 @@ def run(args):
     org_model, teacher_model_type = mimic_util.get_org_model(teacher_model_config, device)
     mimic_model = mimic_util.get_mimic_model(config, org_model, teacher_model_type, teacher_model_config, device)
     cache_data, cache_labels, _, cache_confidences = get_embeddings(train_dataset, mimic_model,
-                                                                    samples_per_class, used_samples_per_class,
                                                                     student_input_shape, device,
+                                                                    fraction_of_samples=1.0,
                                                                     load_from_storage=load_embeddings,
                                                                     store=store_embeddings,
                                                                     embedding_storage=embeddings_storage)
     valid_data, _, valid_labels, valid_confidences = get_embeddings(valid_dataset, mimic_model,
-                                                                    samples_per_class, used_samples_per_class,
                                                                     student_input_shape, device,
+                                                                    fraction_of_samples=1.0,
                                                                     load_from_storage=False,
                                                                     store=False)
     ee_train_dataset = EmbeddingDataset(cache_data, cache_labels, cache_confidences)
@@ -620,7 +619,7 @@ def run(args):
 
     # Train the early exit model starting from an already trained student model
     if args.ee_solo_train:
-        train_ee_model(mimic_model, ee_config, used_samples_per_class, ee_train_dataset, ee_valid_dataset, ee_device)
+        train_ee_model(mimic_model, ee_config, fraction_of_samples_per_class, ee_train_dataset, ee_valid_dataset, ee_device)
 
     # Test original model
     if args.org_eval:

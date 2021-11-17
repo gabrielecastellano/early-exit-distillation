@@ -60,11 +60,11 @@ def get_ee_model(ee_config, device, pre_trained=False):
     ee_model = models[ee_config['type']](**ee_params)
     if pre_trained:
         if ee_config['type'] == 'kmeans':
-            filename = ee_config['ckpt'].format(ee_params['n_labels'], ee_config['used_samples_per_class'], ee_model.key_param())
+            filename = ee_config['ckpt'].format(ee_params['n_labels'], ee_config['samples_fraction'], ee_model.key_param())
         elif ee_config['type'] == 'linear':
-            filename = ee_config['ckpt'].format(ee_params['n_labels'], ee_config['used_samples_per_class'], ee_model.key_param())
+            filename = ee_config['ckpt'].format(ee_params['n_labels'], ee_config['samples_fraction'], ee_model.key_param())
         elif ee_config['type'] == 'faiss_kmeans':
-            filename = ee_config['ckpt'].format(ee_params['n_labels'], ee_config['used_samples_per_class'], ee_model.key_param())
+            filename = ee_config['ckpt'].format(ee_params['n_labels'], ee_config['samples_fraction'], ee_model.key_param())
         else:
             raise UnknownEETypeError(ee_config['type'])
         ee_model.load(filename)

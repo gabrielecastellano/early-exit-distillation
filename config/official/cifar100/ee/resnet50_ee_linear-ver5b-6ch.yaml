@@ -55,9 +55,9 @@ ee_model:
     threshold: [0.6, 0.7, 0.8, 0.9, 0.95]
     load_embeddings: True
     store_embeddings: False
+    shuffle_train_set: True
     storage: !join ['./resource/embeddings/', *dataset_name, '-', *mmodel_type, '-ver', *ver, '-', *bottleneck_channels, 'ch']
-    samples_per_class: 500
-    used_samples_per_class: 500
+    samples_fraction: 1.0
     instance_name: &instance_name !join [*ee_experiment, '_', '{}classes', '_', '{}per-class', '_', 't{}']
     ckpt: !join ['./resource/ckpt/ee/', *instance_name, '.sav']
 

@@ -199,12 +199,13 @@ def get_datasets(dataset_config, compression_type=None, compressed_size=None, no
     return train_dataset, valid_dataset, test_dataset
 
 
-def get_loader(dataset, shuffle=False, n_labels=None, batch_size=64, pin_memory=False):
+def get_loader(dataset, shuffle=False, order_labels=False, n_labels=None, batch_size=64, pin_memory=False):
     """
 
     Args:
         dataset (Dataset):
         shuffle (Bool):
+        order_labels: 
         n_labels (int):
         batch_size (int):
         pin_memory (Bool):
@@ -219,7 +220,12 @@ def get_loader(dataset, shuffle=False, n_labels=None, batch_size=64, pin_memory=
         sub_dataset.targets = sub_dataset.targets[dataset.targets < n_labels]
         sub_dataset.data = sub_dataset.data[dataset.targets < n_labels]
 
-    sampler = RandomSampler(sub_dataset) if shuffle else SequentialSampler(sub_dataset)
+    if order_labels:
+        sampler = PerLabelSampler(sub_dataset, shuffle=shuffle)
+    elif shuffle:
+        sampler = RandomSampler(sub_dataset)
+    else:
+        sampler = SequentialSampler(sub_dataset)
     return DataLoader(sub_dataset, batch_size=batch_size, sampler=sampler, pin_memory=pin_memory)
 
 
