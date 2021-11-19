@@ -287,11 +287,12 @@ def distill(train_loader, valid_loader, student_input_shape, teacher_input_shape
     del student_model
 
 
-def get_embeddings(dataset, model, input_shape, device, fraction_of_samples=1.0, interval=10, split_name='Get Embeddings',
-                   load_from_storage=False, store=False, embedding_storage=None):
+def get_embeddings(dataset, model, input_shape, device, bn_shape, fraction_of_samples=1.0, interval=10,
+                   split_name='Get Embeddings', load_from_storage=False, store=False, embedding_storage=None):
     """
 
     Args:
+        bn_shape:
         dataset:
         model (models.mimic.base.BaseMimic):
         input_shape:
@@ -311,7 +312,7 @@ def get_embeddings(dataset, model, input_shape, device, fraction_of_samples=1.0,
     overall_samples_per_class = overall_samples / overall_classes
     used_samples_per_class = int(fraction_of_samples * overall_samples_per_class)
     used_samples = overall_classes * used_samples_per_class
-    bn_shape = model.head.bn_shape(input_shape, device)
+    # bn_shape = model.head.bn_shape(input_shape, device)
 
     cache_labels = np.zeros([used_samples], dtype=int)
     cache_labels_t = np.zeros([used_samples], dtype=int)
@@ -393,10 +394,11 @@ def save_embeddings_on_storage(cache_data, cache_labels, cache_labels_t, cache_c
     torch.save(cache_confidences, f'{storage_folder}/confidences.sav')
 
 
-def train_ee_model(mimic_model, ee_config, samples_fraction_per_class, train_dataset, valid_dataset, device):
+def train_ee_model(mimic_model, ee_config, samples_fraction_per_class, train_dataset, valid_dataset, bn_shape, device):
     """
 
     Args:
+        bn_shape:
         mimic_model:
         ee_config:
         samples_fraction_per_class: TODO this parameter is ignored
@@ -414,12 +416,12 @@ def train_ee_model(mimic_model, ee_config, samples_fraction_per_class, train_dat
     results = dict()
     best_ee_model = dict()
 
-    configurations = iterate_configurations(ee_type, ee_config['params'], device, ee_config['threshold'])
+    configurations = iterate_configurations(ee_type, ee_config['params'], device, bn_shape, ee_config['threshold'])
 
     for ee_params in configurations:
         n_labels = ee_params['n_labels']
         # samples_subset = used_samples_per_class * label_subset
-        instance_key = f"{n_labels}:{samples_fraction_per_class}"
+
 
         # Initialize early exit model
         ee_model = early_classifier.ee_utils.models[ee_type](**ee_params)
@@ -429,9 +431,6 @@ def train_ee_model(mimic_model, ee_config, samples_fraction_per_class, train_dat
         train_loader = dataset_util.get_loader(train_dataset, shuffle=shuffle, n_labels=n_labels, pin_memory=pin_memory)
         valid_loader = dataset_util.get_loader(valid_dataset, shuffle=False, n_labels=n_labels, pin_memory=pin_memory)
 
-        results.setdefault(instance_key, dict())
-        best_ee_model.setdefault(instance_key, dict())
-
         print(f"Fitting early exit model of type '{ee_type}' with parameters '{ee_params}'...")
         epochs = ee_params['epochs'] if 'epochs' in ee_params else 1
         for epoch in range(epochs):
@@ -439,12 +438,20 @@ def train_ee_model(mimic_model, ee_config, samples_fraction_per_class, train_dat
             # Train early exit model one epoch
             ee_model.fit(train_loader, epoch=epoch)
             # Evaluate early exit model
-            r = evaluate_ee_model(ee_model, mimic_model, valid_loader, device, use_threshold=True)
+            for threshold in ee_config['thresholds']:
+                ee_model.set_threshold(threshold)
+                r = evaluate_ee_model(ee_model, mimic_model, valid_loader, device, use_threshold=True)
 
-            results[instance_key].setdefault(ee_model.key_param(), r)
-            if r['performance'] >= results[instance_key][ee_model.key_param()]['performance']:
-                results[instance_key][ee_model.key_param()] = r
-                best_ee_model[instance_key][ee_model.key_param()] = ee_model.to_state_dict()
+                instance_key = f"{n_labels}:{samples_fraction_per_class}"
+                results.setdefault(instance_key, dict())
+                best_ee_model.setdefault(instance_key, dict())
+
+                results[instance_key].setdefault(ee_model.key_param(), dict())
+                results[instance_key][ee_model.key_param()].setdefault(threshold, r)
+                if r['performance'] >= results[instance_key][ee_model.key_param()][threshold]['performance']:
+                    results[instance_key][ee_model.key_param()][threshold] = r
+                    if threshold == ee_config['thresholds'][0]:
+                        best_ee_model[instance_key][ee_model.key_param()] = ee_model.to_state_dict()
 
     '''
     # store best model
@@ -460,6 +467,7 @@ def train_ee_model(mimic_model, ee_config, samples_fraction_per_class, train_dat
     ee_params = configurations[-1]
     n_labels = ee_params['n_labels']
     instance_key = f"{n_labels}:{samples_fraction_per_class}"
+
     ee_model = early_classifier.ee_utils.models[ee_type](**ee_params)
     ee_model.from_state_dict(best_ee_model[instance_key][ee_model.key_param()])
     dname = ee_config['ckpt']
@@ -602,14 +610,15 @@ def run(args):
     # Generate embedding datasets
     org_model, teacher_model_type = mimic_util.get_org_model(teacher_model_config, device)
     mimic_model = mimic_util.get_mimic_model(config, org_model, teacher_model_type, teacher_model_config, device)
+    bn_shape = mimic_model.head.bn_shape(student_input_shape, device)
     cache_data, cache_labels, _, cache_confidences = get_embeddings(train_dataset, mimic_model,
-                                                                    student_input_shape, device,
+                                                                    student_input_shape, device, bn_shape,
                                                                     fraction_of_samples=1.0,
                                                                     load_from_storage=load_embeddings,
                                                                     store=store_embeddings,
                                                                     embedding_storage=embeddings_storage)
     valid_data, _, valid_labels, valid_confidences = get_embeddings(valid_dataset, mimic_model,
-                                                                    student_input_shape, device,
+                                                                    student_input_shape, device, bn_shape,
                                                                     fraction_of_samples=1.0,
                                                                     load_from_storage=False,
                                                                     store=False)
@@ -618,7 +627,9 @@ def run(args):
 
     # Train the early exit model starting from an already trained student model
     if args.ee_solo_train:
-        train_ee_model(mimic_model, ee_config, fraction_of_samples_per_class, ee_train_dataset, ee_valid_dataset, ee_device)
+        module_util.freeze_module_params(mimic_model)
+        train_ee_model(mimic_model, ee_config, fraction_of_samples_per_class, ee_train_dataset, ee_valid_dataset,
+                       bn_shape, ee_device)
 
     # Test original model
     if args.org_eval:
@@ -636,7 +647,9 @@ def run(args):
     # Test early exit model
     ee_model = ee_utils.get_ee_model(ee_config, device, pre_trained=True)
     ee_valid_loader = dataset_util.get_loader(ee_valid_dataset, shuffle=False, n_labels=ee_model.n_labels)
-    evaluate_ee_model(ee_model, mimic_model, ee_valid_loader, ee_device)
+    for threshold in ee_config['thresholds']:
+        ee_model.set_threshold(threshold)
+        evaluate_ee_model(ee_model, mimic_model, ee_valid_loader, ee_device, use_threshold=True)
 
     # Joint test mimic model with early exit model
     file_util.save_pickle(mimic_model_without_dp, config['mimic_model']['ckpt'])
@@ -644,7 +657,9 @@ def run(args):
         mimic_model = DistributedDataParallel(mimic_model_without_dp, device_ids=device_ids)
     ee_threshold = ee_model.get_threshold()
     if ee_model.n_labels == mimic_model.out_features:
-        evaluate(mimic_model, test_loader, device, ee_model=ee_model, ee_threshold=ee_threshold, title='[BN_EE model]')
+        for threshold in ee_config['thresholds']:
+            ee_model.set_threshold(threshold)
+            evaluate(mimic_model, test_loader, device, ee_model=ee_model, ee_threshold=threshold, title='[BN_EE model]')
 
 
 if __name__ == '__main__':
