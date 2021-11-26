@@ -93,8 +93,11 @@ def resnet152(param_config):
     return ResNet(Bottleneck, [3, 8, 36, 3], **param_config)
 
 
-def resnet_model(model_type, param_config, pretrained=False, weights=None, load_model=False):
+def resnet_model(model_type, param_config, pretrained=False, weights=None, load_model=False, input_size=224):
     model = None
+    xtr_k, xtr_s, xtr_p = 7, 2, 3
+    if input_size == 32:
+        xtr_k, xtr_s, xtr_p = 3, 1, 1
     # TODO use resnet libraries and remove all the useless code
     if model_type == 'resnet18':
         model = resnet18(param_config)
@@ -102,6 +105,9 @@ def resnet_model(model_type, param_config, pretrained=False, weights=None, load_
         model = resnet34(param_config)
     elif model_type == 'resnet50':
         model = models.resnet50(**param_config)
+        model.conv1 = nn.Conv2d(3, 64, kernel_size=xtr_k, stride=xtr_s, padding=xtr_p, bias=False)
+        model.maxpool = nn.Identity()
+        model.fc = nn.Linear(model.fc.in_features, param_config["num_classes"])
     elif model_type == 'resnet101':
         model = resnet101(param_config)
     elif model_type == 'resnet152':
