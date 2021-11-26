@@ -26,7 +26,7 @@ class SeqWithAux(nn.Module):
 '''
 
 class BaseHeadMimic(nn.Module):
-    def __init__(self):
+    def __init__(self, input_size=224):
         super().__init__()
 
     def initialize_weights(self):
@@ -52,9 +52,11 @@ class BaseHeadMimic(nn.Module):
         raise NotImplementedError('forward function must be implemented')
 
     def bn_shape(self, input_shape, device):
-        input_ = torch.empty(1, input_shape[0], input_shape[1], input_shape[2], device=device)
-        bn_output = self.forward_to_bn(input_)
-        return bn_output.shape[1:]
+        self.eval()
+        with torch.no_grad():
+            input_ = torch.empty(1, input_shape[0], input_shape[1], input_shape[2], device=device)
+            bn_output = self.forward_to_bn(input_)
+            return bn_output.shape[1:]
 
 
 class BaseMimic(nn.Module):
