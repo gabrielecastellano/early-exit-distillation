@@ -259,10 +259,10 @@ def mimic_version6(make_bottleneck, bottleneck_channels):
             nn.Conv2d(bottleneck_channels, 32, kernel_size=2, stride=1, padding=1, bias=False),
             nn.BatchNorm2d(32),
             nn.ReLU(inplace=True),
-            nn.Conv2d(32, 64, kernel_size=2, stride=1, padding=1, bias=False),
-            nn.BatchNorm2d(64),
-            nn.ReLU(inplace=True),
-            nn.Conv2d(64, 128, kernel_size=2, stride=1, bias=False),
+            #nn.Conv2d(32, 64, kernel_size=2, stride=1, padding=1, bias=False),
+            #nn.BatchNorm2d(64),
+            #nn.ReLU(inplace=True),
+            nn.Conv2d(32, 128, kernel_size=2, stride=1, padding=1, bias=False),
             nn.BatchNorm2d(128),
             nn.ReLU(inplace=True),
             nn.Conv2d(128, 256, kernel_size=2, stride=1, bias=False),
@@ -286,13 +286,16 @@ def mimic_version6(make_bottleneck, bottleneck_channels):
 
 class ResNetHeadMimic(BaseHeadMimic):
     # designed for input image size [3, 224, 224]
-    def __init__(self, version, dataset_name, bottleneck_channels=3, use_aux=False):
+    def __init__(self, version, dataset_name, bottleneck_channels=3, use_aux=False, input_size=224):
         super().__init__()
+        xtr_k, xtr_s, xtr_p = 7, 2, 3
+        if input_size == 32:
+            xtr_k, xtr_s, xtr_p = 3, 1, 1
         self.extractor = nn.Sequential(
-            nn.Conv2d(3, 64, kernel_size=7, stride=2, padding=3, bias=False),
+            nn.Conv2d(3, 64, kernel_size=xtr_k, stride=xtr_s, padding=xtr_p, bias=False),
             nn.BatchNorm2d(64),
             nn.ReLU(inplace=True),
-            nn.MaxPool2d(kernel_size=3, stride=2, padding=1)
+            nn.MaxPool2d(kernel_size=3, stride=2, padding=1) if input_size != 32 else nn.Identity()
         )
         if version in ['1', '1b']:
             self.module_seq1, self.module_seq2 = mimic_version1(version == '1b', bottleneck_channels)
