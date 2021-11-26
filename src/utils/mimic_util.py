@@ -53,7 +53,7 @@ def get_teacher_model(teacher_model_config, input_shape, device):
     return extract_teacher_model(model, input_shape, device, teacher_model_config), model_config['type']
 
 
-def get_student_model(teacher_model_type, student_model_config, dataset_name):
+def get_student_model(teacher_model_type, student_model_config, dataset_name, input_size=224):
     student_model_type = student_model_config['type']
     student_model_version = student_model_config['version']
     params_config = student_model_config['params']
@@ -63,7 +63,7 @@ def get_student_model(teacher_model_type, student_model_config, dataset_name):
     elif teacher_model_type == 'inception_v3' and student_model_type == 'inception_v3_head_mimic':
         return InceptionHeadMimic(student_model_version, dataset_name, **params_config)
     elif teacher_model_type.startswith('resnet') and student_model_type == 'resnet152_head_mimic' or student_model_type == 'resnet50_head_mimic':
-        return ResNetHeadMimic(student_model_version, dataset_name, **params_config)
+        return ResNetHeadMimic(student_model_version, dataset_name, input_size=input_size, **params_config)
     elif teacher_model_type == 'mobilenet_v2' and student_model_type == 'mobilenet_v2_head_mimic':
         return MobileNetHeadMimic(student_model_version, **params_config)
     raise ValueError('teacher_model_type `{}` is not expected'.format(teacher_model_type))
@@ -71,7 +71,8 @@ def get_student_model(teacher_model_type, student_model_config, dataset_name):
 
 def load_student_model(config, teacher_model_type, device):
     student_model_config = config['student_model']
-    student_model = get_student_model(teacher_model_type, student_model_config, config['dataset']['name'])
+    input_size = config['input_shape'][-1]
+    student_model = get_student_model(teacher_model_type, student_model_config, config['dataset']['name'], input_size)
     student_model = student_model.to(device)
     resume_from_ckpt(student_model_config['ckpt'], student_model, device, True)
     return student_model

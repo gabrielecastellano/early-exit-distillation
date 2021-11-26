@@ -19,6 +19,7 @@ def get_model(config, device=None):
     model = None
     model_config = config['model']
     model_type = model_config['type']
+    input_size = config['input_shape'][-1]
     if model_type == 'alexnet':
         model = AlexNet(**model_config['params'])
     elif model_type.startswith('densenet'):
@@ -26,7 +27,7 @@ def get_model(config, device=None):
     elif model_type == 'lenet5':
         model = LeNet5(**model_config['params'])
     elif model_type.startswith('resnet'):
-        model = resnet_model(model_type, model_config['params'], model_config['pretrained'], model_config['weights'], model_config['load_model'])
+        model = resnet_model(model_type, model_config['params'], model_config['pretrained'], model_config['weights'], model_config['load_model'], input_size)
     elif model_type.startswith('mobilenet'):
         model = mobilenet_model(model_type, model_config['params'], model_config['pretrained'])
     elif model_type.startswith('inception_v3'):

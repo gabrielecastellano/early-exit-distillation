@@ -48,10 +48,11 @@ def get_data_loaders(dataset_config, batch_size=100, compression_type=None, comp
 
     if dataset_name == 'cifar100':
         transform_train = transforms.Compose([
-            #transforms.RandomResizedCrop(reshape_size[0]),
-            transforms.Resize(rough_size),
-            transforms.RandomCrop(reshape_size),
+            transforms.RandomResizedCrop(reshape_size),
+            #transforms.Resize(rough_size),
+            #transforms.RandomCrop(reshape_size),
             transforms.RandomHorizontalFlip(),
+            transforms.RandomRotation(15),
             transforms.ToTensor(),
             transforms.Normalize(mean, std)
         ])
@@ -62,8 +63,8 @@ def get_data_loaders(dataset_config, batch_size=100, compression_type=None, comp
             transforms.Normalize(mean, std)
         ])
         transform_test = transforms.Compose([
-            transforms.Resize(rough_size),
-            transforms.CenterCrop(reshape_size),
+            transforms.Resize(reshape_size),
+            # transforms.CenterCrop(reshape_size),
             transforms.ToTensor(),
             transforms.Normalize(mean, std)
         ])
