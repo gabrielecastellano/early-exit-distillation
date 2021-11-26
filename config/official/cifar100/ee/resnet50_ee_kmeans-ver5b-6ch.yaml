@@ -42,6 +42,7 @@ ee_model:
     load_embeddings: True
     store_embeddings: False
     shuffle_train_set: True
+    device: 'cpu'
     storage: !join ['./resource/embeddings/', *dataset_name, '-', *mmodel_type, '-ver', *ver, '-', *bottleneck_channels, 'ch']
     samples_fraction: 1.0
     ckpt: !join ['./resource/ckpt/ee/', *ee_experiment, '_', '{}classes', '_', '{}per-class', '_', 'k{}', '.sav']

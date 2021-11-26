@@ -42,11 +42,15 @@ class LinearClassifier(BaseClassifier):
     def predict(self, x):
         self.model.eval()
         with torch.no_grad():
-            in_device = x.device
-            x = x.to(self.device)
-            y = self.model.forward(x)
+            y = self.forward(x)
             y = torch.softmax(y, dim=-1)
-            return y.to(in_device)
+            return y
+
+    def forward(self, x):
+        in_device = x.device
+        x = x.to(self.device)
+        y = self.model.forward(x)
+        return y.to(in_device)
 
     def get_prediction_confidences(self, y):
         return torch.max(y, -1)[0]
@@ -54,12 +58,15 @@ class LinearClassifier(BaseClassifier):
     def get_threshold(self):
         return self.threshold
 
+    def set_threshold(self, threshold):
+        self.threshold = threshold
+
     def init_results(self):
         d = dict()
         return d
 
     def key_param(self):
-        return self.get_threshold()
+        return 1
 
     def to_state_dict(self):
         model_dict = dict({
@@ -100,3 +107,12 @@ class LinearClassifier(BaseClassifier):
         self.device = device
         self.model = self.model.to(device)
         return self
+
+    def get_model_parameters(self):
+        return self.model.parameters()
+
+    def get_cls_loss(self, p, t):
+        return self.criterion(p, t)
+
+    def train(self):
+        self.model.train()

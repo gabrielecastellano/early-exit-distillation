@@ -83,6 +83,10 @@ class KMeansClassifier(BaseClassifier):
     def get_threshold(self):
         return self.share_threshold
 
+    def set_threshold(self, threshold):
+        if threshold != 'auto':
+            self.share_threshold = np.quantile(self.valid_shares, threshold)
+
     def init_results(self):
         d = dict()
         d['shares'] = self.valid_shares
@@ -131,3 +135,9 @@ class KMeansClassifier(BaseClassifier):
     def to(self, device):
         self.device = device
         return self
+
+    def get_cls_loss(self, p, t):
+        return torch.nn.CrossEntropyLoss(p, t)
+
+    def train(self):
+        pass

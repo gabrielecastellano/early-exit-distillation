@@ -22,6 +22,8 @@ class FaissKMeansClassifier(BaseClassifier):
         self.cluster_sizes = np.zeros(self.k, dtype=int)
         self.valid_shares = None
         self.share_threshold = threshold
+        if type(threshold) == list:
+            self.share_threshold = threshold[0]
         self.distances_q = None
 
     def fit(self, data_loader, epoch=0):
@@ -90,6 +92,12 @@ class FaissKMeansClassifier(BaseClassifier):
     def get_threshold(self):
         return self.share_threshold
 
+    def set_threshold(self, threshold):
+        if threshold != 'auto':
+            self.share_threshold = np.quantile(self.valid_shares, threshold)
+        else:
+            self.share_threshold = np.quantile(self.valid_shares, 0.5)
+
     def init_results(self):
         d = dict()
         d['shares'] = self.valid_shares
@@ -152,3 +160,9 @@ class FaissKMeansClassifier(BaseClassifier):
         self.device = device
         self.model.gpu = 'cuda' in device.type
         return self
+
+    def get_cls_loss(self, p, t):
+        return torch.nn.CrossEntropyLoss(p, t)
+
+    def train(self):
+        pass

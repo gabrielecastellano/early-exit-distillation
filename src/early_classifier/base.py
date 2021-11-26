@@ -1,6 +1,7 @@
 class BaseClassifier:
 
     def __init__(self, device, n_labels):
+        self.model = None
         self.device = device
         self.n_labels = n_labels
 
@@ -62,4 +63,16 @@ class BaseClassifier:
         raise NotImplementedError('predict method must be implemented')
 
     def to(self, device):
+        raise NotImplementedError('predict method must be implemented')
+
+    def get_model_parameters(self):
+        return list()
+
+    def get_cls_loss(self, p, t):
+        raise NotImplementedError('predict method must be implemented')
+
+    def train(self):
+        raise NotImplementedError('predict method must be implemented')
+
+    def set_threshold(self, threshold):
         raise NotImplementedError('predict method must be implemented')

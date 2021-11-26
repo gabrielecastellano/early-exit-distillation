@@ -58,7 +58,7 @@ def save_ckpt(student_model, epoch, best_valid_value, ckpt_file_path, teacher_mo
 
 
 @torch.no_grad()
-def evaluate(model, data_loader, device, ee_model=None, ee_threshold=0, interval=1000, split_name='Test', title=None):
+def evaluate(model, data_loader, device, ee_model=None, interval=1000, split_name='Test', title=None):
     """
     Run the model on a test set and compute the top-1 and top-5 accuracy.
     The model is run jointly with an early exit model.
@@ -67,7 +67,6 @@ def evaluate(model, data_loader, device, ee_model=None, ee_threshold=0, interval
         data_loader:
         device:
         ee_model (BaseClassifier):
-        ee_threshold:
         interval:
         split_name:
         title:
@@ -82,10 +81,11 @@ def evaluate(model, data_loader, device, ee_model=None, ee_threshold=0, interval
     if ee_model is not None:
         ee_model = ee_model.to(ee_model.device)
 
-    overall_samples = 50000
-    overall_samples_per_class = 500
-    used_samples_per_class = 500
-    samples = int(overall_samples / overall_samples_per_class) * used_samples_per_class
+    # overall_samples = 50000
+    overall_samples_per_class = 100
+    used_samples_per_class = 100
+    # samples = int(overall_samples / overall_samples_per_class) * used_samples_per_class
+    samples = len(data_loader.dataset)
 
     num_threads = torch.get_num_threads()
     torch.set_num_threads(1)
@@ -126,7 +126,7 @@ def evaluate(model, data_loader, device, ee_model=None, ee_threshold=0, interval
                 # forward not-confident vectors to the full model
                 # c, p = torch.max(torch.nn.functional.softmax(ee_output[i], dim=0), 0)
                 # full_predictions = bn_output[ee_output < ee_threshold].gpu()
-                full_predictions = bn_output[ee_conf < ee_threshold]
+                full_predictions = bn_output[ee_conf < ee_model.get_threshold()]
                 new_early_exits = data_loader.batch_size - full_predictions.shape[0]
                 output = ee_output.to(model.device)
                 # early_exit_ctr += new_early_exits
@@ -136,7 +136,7 @@ def evaluate(model, data_loader, device, ee_model=None, ee_threshold=0, interval
                     # merge early and full predictions
                     j = 0
                     for i in range(len(ee_output)):
-                        if ee_conf[i] < ee_threshold:
+                        if ee_conf[i] < ee_model.get_threshold():
                             output[i] = full_output[j]
                             j += 1
 
@@ -198,13 +198,18 @@ def distill_one_epoch(student_model, teacher_model, teacher_input_size, student_
         sample_batch, targets = sample_batch.to(device), targets.to(device)
         optimizer.zero_grad()
         teacher_outputs = teacher_model(teacher_upsampler(sample_batch))
+        cls_loss = 0
         if ee_model:
+            ee_model.train()
             embedding = student_model.forward_to_bn(student_upsampler(sample_batch))
             student_outputs = student_model.forward_from_bn(embedding)
+            ee_outputs = ee_model.forward(embedding)
+            cls_loss = ee_model.get_cls_loss(ee_outputs, targets)
         else:
             student_outputs = student_model(student_upsampler(sample_batch))
         # TODO use the embedding for joint training (loss should be affected by early classification)
-        loss = criterion(student_outputs, teacher_outputs)
+        rec_loss = criterion(student_outputs, teacher_outputs)
+        loss = rec_loss + cls_loss
 
         loss.backward()
         optimizer.step()
@@ -248,7 +253,8 @@ def distill(train_loader, valid_loader, student_input_shape, teacher_input_shape
     criterion_config = train_config['criterion']
     criterion = func_util.get_loss(criterion_config['type'], criterion_config['params'])
     optim_config = train_config['optimizer']
-    optimizer = func_util.get_optimizer(student_model, optim_config['type'], optim_config['params'])
+    optimizer = func_util.get_optimizer(list(student_model.parameters()) + list(ee_model.get_model_parameters()),
+                                        optim_config['type'], optim_config['params'])
     scheduler_config = train_config['scheduler']
     scheduler = func_util.get_scheduler(optimizer, scheduler_config['type'], scheduler_config['params'])
     interval = train_config['interval']
@@ -416,12 +422,11 @@ def train_ee_model(mimic_model, ee_config, samples_fraction_per_class, train_dat
     results = dict()
     best_ee_model = dict()
 
-    configurations = iterate_configurations(ee_type, ee_config['params'], device, bn_shape, ee_config['threshold'])
+    configurations, thresholds = iterate_configurations(ee_type, ee_config['params'], device, bn_shape, ee_config['thresholds'])
 
     for ee_params in configurations:
         n_labels = ee_params['n_labels']
         # samples_subset = used_samples_per_class * label_subset
-
 
         # Initialize early exit model
         ee_model = early_classifier.ee_utils.models[ee_type](**ee_params)
@@ -438,7 +443,7 @@ def train_ee_model(mimic_model, ee_config, samples_fraction_per_class, train_dat
             # Train early exit model one epoch
             ee_model.fit(train_loader, epoch=epoch)
             # Evaluate early exit model
-            for threshold in ee_config['thresholds']:
+            for threshold in thresholds:
                 ee_model.set_threshold(threshold)
                 r = evaluate_ee_model(ee_model, mimic_model, valid_loader, device, use_threshold=True)
 
@@ -450,7 +455,7 @@ def train_ee_model(mimic_model, ee_config, samples_fraction_per_class, train_dat
                 results[instance_key][ee_model.key_param()].setdefault(threshold, r)
                 if r['performance'] >= results[instance_key][ee_model.key_param()][threshold]['performance']:
                     results[instance_key][ee_model.key_param()][threshold] = r
-                    if threshold == ee_config['thresholds'][0]:
+                    if threshold == thresholds[0]:
                         best_ee_model[instance_key][ee_model.key_param()] = ee_model.to_state_dict()
 
     '''
@@ -481,7 +486,7 @@ def train_ee_model(mimic_model, ee_config, samples_fraction_per_class, train_dat
     with open(f"{dname}/{experiment_name}_{time.strftime('%Y%m%d-%H%M%S')}.json", "w") as f:
         json.dump(results, f)
 
-def evaluate_ee_model(ee_model, mimic_model, data_loader, device, interval=100, split_name='Evaluate EE', use_threshold=True):
+def evaluate_ee_model(ee_model, mimic_model, data_loader, device, interval=100, use_threshold=True):
 
     mimic_model = mimic_model.to(mimic_model.device)
     ee_model = ee_model.to(ee_model.device)
@@ -491,7 +496,14 @@ def evaluate_ee_model(ee_model, mimic_model, data_loader, device, interval=100, 
     metric_logger.add_meter('ee_acc5', SmoothedValue())
     metric_logger.add_meter('ee_acc1_c', SmoothedValue())
     metric_logger.add_meter('ee_acc5_c', SmoothedValue())
+
+    if not use_threshold:
+        confidence_threshold = 0
+    else:
+        confidence_threshold = ee_model.get_threshold()
+    split_name = 'Evaluate EE t={}'.format(ee_model.get_threshold())
     header = '{}:'.format(split_name)
+
     num_threads = torch.get_num_threads()
     torch.set_num_threads(1)
     ee_model.eval()
@@ -517,10 +529,6 @@ def evaluate_ee_model(ee_model, mimic_model, data_loader, device, interval=100, 
         ee_output = ee_output.to(device)
         ee_conf = ee_conf.to(device)
 
-        if not use_threshold:
-            confidence_threshold = 0.2
-        else:
-            confidence_threshold = ee_model.get_threshold()
         confident_output = ee_output[ee_conf >= confidence_threshold]
         confident_targets = target[ee_conf >= confidence_threshold]
 
@@ -582,12 +590,12 @@ def run(args):
     teacher_input_shape = yaml_util.load_yaml_file(teacher_model_config['config'])['input_shape']
 
     ee_config = config['ee_model']
-    ee_threshold = ee_config['threshold']
     fraction_of_samples_per_class = ee_config['samples_fraction']
     load_embeddings = ee_config['load_embeddings']
     store_embeddings = ee_config['store_embeddings']
     embeddings_storage = ee_config['storage']
     ee_device = torch.device(ee_config['device'] if torch.cuda.is_available() else 'cpu')
+    ee_config['thresholds'] = ee_config['thresholds'] if type(ee_config['thresholds']) == list else [ee_config['thresholds']]
 
     # Build datasets and loaders for full model
     input_shape = teacher_input_shape if teacher_input_shape[-1] > student_input_shape[-1] else student_input_shape
@@ -599,13 +607,6 @@ def run(args):
     valid_loader = dataset_util.get_loader(valid_dataset, shuffle=False, batch_size=test_config['batch_size'], pin_memory=pin_memory)
     test_loader = dataset_util.get_loader(test_dataset, shuffle=False, batch_size=test_config['batch_size'], pin_memory=pin_memory)
 
-    # Train mimic model through distillation from the original model
-    if args.bn_train:
-        ee_model = None
-        if args.ee_joint_train:
-            ee_model = early_classifier.ee_utils.get_ee_model(ee_config, device)
-        distill(train_loader, valid_loader, student_input_shape, teacher_input_shape, config, device, distributed,
-                device_ids, ee_model=ee_model, ee_threshold=ee_threshold)
 
     # Generate embedding datasets
     org_model, teacher_model_type = mimic_util.get_org_model(teacher_model_config, device)
@@ -625,6 +626,14 @@ def run(args):
     ee_train_dataset = EmbeddingDataset(cache_data, cache_labels, cache_confidences)
     ee_valid_dataset = EmbeddingDataset(valid_data, valid_labels, valid_confidences)
 
+    # Train mimic model through distillation from the original model
+    if args.bn_train:
+        ee_model = None
+        if args.ee_joint_train:
+            ee_model = early_classifier.ee_utils.get_ee_model(ee_config, bn_shape, device)
+        distill(train_loader, valid_loader, student_input_shape, teacher_input_shape, config, device, distributed,
+                device_ids, ee_model=ee_model)
+
     # Train the early exit model starting from an already trained student model
     if args.ee_solo_train:
         module_util.freeze_module_params(mimic_model)
@@ -632,12 +641,14 @@ def run(args):
                        bn_shape, ee_device)
 
     # Test original model
+    org_model, teacher_model_type = mimic_util.get_org_model(teacher_model_config, device)
     if args.org_eval:
         if distributed:
             org_model = DataParallel(org_model, device_ids=device_ids)
         evaluate(org_model, test_loader, device, title='[Original model]')
 
     # Test mimic model
+    mimic_model = mimic_util.get_mimic_model(config, org_model, teacher_model_type, teacher_model_config, device)
     mimic_model_without_dp = mimic_model.module if isinstance(mimic_model, DataParallel) else mimic_model
     if args.bn_eval:
         if distributed:
@@ -645,21 +656,23 @@ def run(args):
         evaluate(mimic_model, test_loader, device, title='[BN model]')
 
     # Test early exit model
-    ee_model = ee_utils.get_ee_model(ee_config, device, pre_trained=True)
-    ee_valid_loader = dataset_util.get_loader(ee_valid_dataset, shuffle=False, n_labels=ee_model.n_labels)
-    for threshold in ee_config['thresholds']:
-        ee_model.set_threshold(threshold)
-        evaluate_ee_model(ee_model, mimic_model, ee_valid_loader, ee_device, use_threshold=True)
+    ee_model = ee_utils.get_ee_model(ee_config, device, bn_shape, pre_trained=True)
+    if ee_model:
+        ee_valid_loader = dataset_util.get_loader(ee_valid_dataset, shuffle=False, n_labels=ee_model.n_labels)
+        for threshold in ee_config['thresholds']:
+            ee_model.set_threshold(threshold)
+            evaluate_ee_model(ee_model, mimic_model, ee_valid_loader, ee_device, use_threshold=True)
 
-    # Joint test mimic model with early exit model
+    # Test jointly mimic model with early exit model
+    mimic_model = mimic_util.get_mimic_model(config, org_model, teacher_model_type, teacher_model_config, device)
+    ee_model = ee_utils.get_ee_model(ee_config, device, bn_shape, pre_trained=True)
     file_util.save_pickle(mimic_model_without_dp, config['mimic_model']['ckpt'])
     if distributed:
         mimic_model = DistributedDataParallel(mimic_model_without_dp, device_ids=device_ids)
-    ee_threshold = ee_model.get_threshold()
-    if ee_model.n_labels == mimic_model.out_features:
+    if ee_model and ee_model.n_labels == mimic_model.out_features:
         for threshold in ee_config['thresholds']:
             ee_model.set_threshold(threshold)
-            evaluate(mimic_model, test_loader, device, ee_model=ee_model, ee_threshold=threshold, title='[BN_EE model]')
+            evaluate(mimic_model, test_loader, device, ee_model=ee_model, title=f'[BN_EE model - t={threshold}]')
 
 
 if __name__ == '__main__':

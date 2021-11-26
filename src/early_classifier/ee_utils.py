@@ -28,11 +28,9 @@ def iterate_configurations(ee_type, params, device, bn_shape, thresholds='auto')
         thresholds = [thresholds]
     if ee_type == 'kmeans':
         return [{'n_labels': classes_subset,
-                 'k': clusters_per_class*classes_subset,
-                 'threshold': threshold}
+                 'k': clusters_per_class*classes_subset}
                 for classes_subset in params['labels_subsets']
-                for clusters_per_class in params['clusters_per_labels']
-                for threshold in thresholds]
+                for clusters_per_class in params['clusters_per_labels']], thresholds
     elif ee_type == 'linear':
         return [{'device': device,
                  'n_labels': classes_subset,
@@ -42,19 +40,16 @@ def iterate_configurations(ee_type, params, device, bn_shape, thresholds='auto')
                  'criterion_config': params['criterion'],
                  'validation_dataset': None,
                  'batch_size': params['batch_size'],
-                 'epochs': params['epoch'],
-                 'threshold': threshold}
-                for classes_subset in params['labels_subsets']
-                for threshold in thresholds]
+                 'epochs': params['epoch']}
+                for classes_subset in params['labels_subsets']], thresholds
     if ee_type == 'faiss_kmeans':
         return [{'device': device,
                  'n_labels': classes_subset,
                  'k': clusters_per_class*classes_subset,
                  'dim': np.prod(bn_shape),
-                 'threshold': threshold}
+                 'threshold': thresholds}
                 for classes_subset in params['labels_subsets']
-                for clusters_per_class in params['clusters_per_labels']
-                for threshold in thresholds]
+                for clusters_per_class in params['clusters_per_labels']], thresholds
     elif ee_type == 'sdgm':
         return [{'device': device,
                  'n_labels': classes_subset,
@@ -64,16 +59,15 @@ def iterate_configurations(ee_type, params, device, bn_shape, thresholds='auto')
                  'validation_dataset': None,
                  'per_label_components': params['per_label_components'],
                  'batch_size': params['batch_size'],
-                 'epochs': params['epoch'],
-                 'threshold': threshold}
-                for classes_subset in params['labels_subsets']
-                for threshold in thresholds]
+                 'epochs': params['epoch']}
+                for classes_subset in params['labels_subsets']], thresholds
     else:
         raise UnknownEETypeError(ee_type)
 
 
-def get_ee_model(ee_config, device, pre_trained=False):
-    ee_params = iterate_configurations(ee_config['type'], ee_config['params'], device, ee_config['threshold'])[-1]
+def get_ee_model(ee_config, device, bn_shape, pre_trained=False):
+    ee_params, threshold = iterate_configurations(ee_config['type'], ee_config['params'], device, bn_shape, ee_config['thresholds'])
+    ee_params, threshold = ee_params[-1], threshold[-1]
     ee_model = models[ee_config['type']](**ee_params)
     if pre_trained:
         if ee_config['type'] == 'kmeans':
@@ -87,4 +81,5 @@ def get_ee_model(ee_config, device, pre_trained=False):
         else:
             raise UnknownEETypeError(ee_config['type'])
         ee_model.load(filename)
+        ee_model.set_threshold(threshold)
     return ee_model

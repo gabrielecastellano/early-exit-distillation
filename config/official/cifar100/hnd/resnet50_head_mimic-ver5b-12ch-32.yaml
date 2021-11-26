@@ -1,0 +1,59 @@
+dataset:
+    name: &dataset_name 'cifar100'
+    root: &data_dir './resource/data/cifar100/'
+    data:
+        train: !join [*data_dir, 'train.txt']
+        valid: !join [*data_dir, 'valid.txt']
+        test: !join [*data_dir, 'valid.txt']
+    num_workers: 16
+    normalizer:
+        mean: [0.5070751592371323, 0.48654887331495095, 0.4409178433670343]
+        std: [0.2673342858792401, 0.2564384629170883, 0.27615047132568404]
+
+input_shape: [3, 32, 32]
+
+teacher_model:
+    config: './config/official/cifar100/org/resnet50_32.yaml'
+    extract_designed_module: False
+    start_idx: 0
+    end_idx: 11 # 7, 15, 55 for vers. 1, 2, 3
+    input_shape: [3, 32, 32]
+
+student_model:
+    type: &smodel_type 'resnet50_head_mimic'
+    version: &ver '5b'
+    experiment: &distill_experiment !join [*dataset_name, '-', *smodel_type, '-ver', *ver]
+    params:
+        bottleneck_channels: &bottleneck_channels 12
+        use_aux: False
+    ckpt: !join ['./resource/ckpt/hnd/', *distill_experiment, '-', *bottleneck_channels, 'ch-32.pt']
+
+mimic_model:
+    type: &mmodel_type 'resnet50_mimic'
+    experiment: &mimic_experiment !join [*dataset_name, '-', *mmodel_type, '-ver', *ver]
+    ckpt: !join ['./resource/ckpt/hnd/', *mimic_experiment, '-', *bottleneck_channels, 'ch-32.pt']
+
+train:
+    epoch: 120
+    batch_size: 64
+    rough_size: 36
+    interval: -1
+    optimizer:
+        type: 'Adam'
+        params:
+            lr: 0.01
+            # lr: 0.00016
+            # momentum: 0.9
+            # weight_decay: 0.0005
+    scheduler:
+        type: 'MultiStepLR'
+        params:
+            milestones: [30, 60, 80, 100]
+            gamma: 0.2
+    criterion:
+        type: 'MSELoss'
+        params:
+            reduction: 'sum'
+
+test:
+    batch_size: 32
