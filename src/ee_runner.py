@@ -99,7 +99,7 @@ def evaluate(model, data_loader, device, ee_model=None, interval=1000, split_nam
         img_ctr_wide = -1
         img_ctr = 0
         early_exit_ctr = 0
-        for image, target in metric_logger.log_every(data_loader, interval, header):
+        for image, target, _ in metric_logger.log_every(data_loader, interval, header):
 
             img_ctr_wide += data_loader.batch_size
             if img_ctr_wide % overall_samples_per_class >= used_samples_per_class:
@@ -183,7 +183,7 @@ def validate(student_model_without_ddp, data_loader, config, device, distributed
 
 
 def distill_one_epoch(student_model, teacher_model, teacher_input_size, student_input_size, train_loader, optimizer,
-                      criterion, epoch, device, interval, ee_model=None, ee_threshold=0):
+                      criterion, epoch, device, interval, bn_shape, ee_model=None, ee_threshold='auto'):
     student_model.train()
     teacher_model.eval()
     metric_logger = MetricLogger(delimiter='  ')
@@ -193,37 +193,48 @@ def distill_one_epoch(student_model, teacher_model, teacher_input_size, student_
     # TODO check if this preserves the accuracy of the models
     student_upsampler = torch.nn.Upsample(student_input_size).to(device)
     teacher_upsampler = torch.nn.Upsample(teacher_input_size).to(device)
-    for sample_batch, targets in metric_logger.log_every(train_loader, interval, header):
+    for sample_batch, targets, indexes in metric_logger.log_every(train_loader, interval, header):
         start_time = time.time()
         sample_batch, targets = sample_batch.to(device), targets.to(device)
+        batch_size = sample_batch.shape[0]
         optimizer.zero_grad()
         teacher_outputs = teacher_model(teacher_upsampler(sample_batch))
         cls_loss = 0
         if ee_model:
             ee_model.train()
-            embedding = student_model.forward_to_bn(student_upsampler(sample_batch))
-            student_outputs = student_model.forward_from_bn(embedding)
+            # get embedding
+            bn_output = student_model.forward_to_bn(student_upsampler(sample_batch))
+            embedding = bn_output.detach()
+            embedding = embedding.reshape((embedding.shape[0], np.prod(embedding.shape[1:])))
+            # early prediction
             ee_outputs = ee_model.forward(embedding)
+            # full prediction
+            student_outputs = student_model.forward_from_bn(bn_output)
+            # update ee model
+            ee_model.update_and_fit(embedding, indexes, epoch)
+            ee_model.set_threshold(ee_threshold)
             cls_loss = ee_model.get_cls_loss(ee_outputs, targets)
         else:
             student_outputs = student_model(student_upsampler(sample_batch))
         # TODO use the embedding for joint training (loss should be affected by early classification)
         rec_loss = criterion(student_outputs, teacher_outputs)
-        loss = rec_loss + cls_loss
+        loss = rec_loss + 2000*cls_loss
 
         loss.backward()
         optimizer.step()
-        batch_size = sample_batch.shape[0]
+
         metric_logger.update(loss=loss.item(), lr=optimizer.param_groups[0]['lr'])
         metric_logger.meters['img/s'].update(batch_size / (time.time() - start_time))
 
 
 def distill(train_loader, valid_loader, student_input_shape, teacher_input_shape, config, device, distributed,
-            device_ids, ee_model=None, ee_threshold='auto'):
+            device_ids, bn_shape, ee_model=None, ee_threshold='auto', ee_dataset=None):
     """
     Train the (head of a) student model by knowledge distillation from the teacher model.
     The student is stored in ckpt.
     Args:
+        ee_dataset:
+        bn_shape:
         train_loader:
         valid_loader:
         student_input_shape:
@@ -239,10 +250,10 @@ def distill(train_loader, valid_loader, student_input_shape, teacher_input_shape
 
     """
     teacher_model_config = config['teacher_model']
-    teacher_model, teacher_model_type = mimic_util.get_teacher_model(teacher_model_config, student_input_shape, device)
+    teacher_model, teacher_model_type = mimic_util.get_teacher_model(teacher_model_config, teacher_input_shape, device)
     module_util.freeze_module_params(teacher_model)
     student_model_config = config['student_model']
-    student_model = mimic_util.get_student_model(teacher_model_type, student_model_config, config['dataset']['name'])
+    student_model = mimic_util.get_student_model(teacher_model_type, student_model_config, config['dataset']['name'], student_input_shape[-1])
     student_model = student_model.to(device)
     start_epoch, best_valid_acc = mimic_util.resume_from_ckpt(student_model_config['ckpt'], student_model, device,
                                                               is_student=True)
@@ -271,12 +282,14 @@ def distill(train_loader, valid_loader, student_input_shape, teacher_input_shape
     ckpt_file_path = student_model_config['ckpt']
     end_epoch = start_epoch + train_config['epoch']
     start_time = time.time()
+    ee_model.init_and_fit(ee_dataset)
     for epoch in range(start_epoch, end_epoch):
         if distributed:
             train_loader.sampler.set_epoch(epoch)
-
-        distill_one_epoch(student_model, teacher_model, student_input_shape[-1], teacher_input_shape[-1], train_loader, optimizer, criterion,
-                          epoch, device, interval)
+        # distill
+        distill_one_epoch(student_model, teacher_model, student_input_shape[-1], teacher_input_shape[-1], train_loader,
+                          optimizer, criterion, epoch, device, interval, bn_shape, ee_model, ee_threshold)
+        # evaluate
         ee_threshold = ee_model.get_threshold() if ee_threshold == 'auto' else ee_threshold
         valid_acc = validate(student_model, valid_loader, config, device, distributed, device_ids, ee_model, ee_threshold)
         if valid_acc > best_valid_acc and main_util.is_main_process():
@@ -284,6 +297,8 @@ def distill(train_loader, valid_loader, student_input_shape, teacher_input_shape
             best_valid_acc = valid_acc
             save_ckpt(student_model_without_ddp, epoch, best_valid_acc, ckpt_file_path, teacher_model_type)
         scheduler.step()
+        # fit the ee model to the new embeddings
+        ee_model.init_and_fit()
 
     dist.barrier()
     total_time = time.time() - start_time
@@ -352,7 +367,7 @@ def get_embeddings(dataset, model, input_shape, device, bn_shape, fraction_of_sa
         with torch.no_grad():
             img_ctr_wide = -1
             img_ctr = 0
-            for image, target in metric_logger.log_every(data_loader, len(data_loader.dataset), header):
+            for image, target, _ in metric_logger.log_every(data_loader, len(data_loader.dataset), header):
                 img_ctr_wide += data_loader.batch_size
                 if img_ctr_wide%overall_samples_per_class >= used_samples_per_class:
                     continue
@@ -607,7 +622,6 @@ def run(args):
     valid_loader = dataset_util.get_loader(valid_dataset, shuffle=False, batch_size=test_config['batch_size'], pin_memory=pin_memory)
     test_loader = dataset_util.get_loader(test_dataset, shuffle=False, batch_size=test_config['batch_size'], pin_memory=pin_memory)
 
-
     # Generate embedding datasets
     org_model, teacher_model_type = mimic_util.get_org_model(teacher_model_config, device)
     mimic_model = mimic_util.get_mimic_model(config, org_model, teacher_model_type, teacher_model_config, device)
@@ -630,9 +644,10 @@ def run(args):
     if args.bn_train:
         ee_model = None
         if args.ee_joint_train:
-            ee_model = early_classifier.ee_utils.get_ee_model(ee_config, bn_shape, device)
+            ee_model = early_classifier.ee_utils.get_ee_model(ee_config, device, bn_shape, pre_trained=False)
         distill(train_loader, valid_loader, student_input_shape, teacher_input_shape, config, device, distributed,
-                device_ids, ee_model=ee_model)
+                device_ids, bn_shape, ee_model=ee_model, ee_threshold=ee_config['thresholds'][0],
+                ee_dataset=ee_train_dataset)
 
     # Train the early exit model starting from an already trained student model
     if args.ee_solo_train:

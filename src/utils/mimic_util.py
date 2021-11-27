@@ -75,6 +75,7 @@ def load_student_model(config, teacher_model_type, device):
     student_model = get_student_model(teacher_model_type, student_model_config, config['dataset']['name'], input_size)
     student_model = student_model.to(device)
     resume_from_ckpt(student_model_config['ckpt'], student_model, device, True)
+    student_model.device = device
     return student_model
 
 

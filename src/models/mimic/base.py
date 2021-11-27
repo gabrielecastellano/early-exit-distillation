@@ -28,6 +28,7 @@ class SeqWithAux(nn.Module):
 class BaseHeadMimic(nn.Module):
     def __init__(self, input_size=224):
         super().__init__()
+        self.device = None
 
     def initialize_weights(self):
         for m in self.modules():

@@ -55,6 +55,9 @@ class LinearClassifier(BaseClassifier):
     def get_prediction_confidences(self, y):
         return torch.max(y, -1)[0]
 
+
+    def go_ramen(self):
+        pass
     def get_threshold(self):
         return self.threshold
 

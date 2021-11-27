@@ -168,11 +168,12 @@ def get_datasets(dataset_config, compression_type=None, compressed_size=None, no
             transforms.ToTensor(),
             transforms.Normalize(mean, std)
         ])
-        train_dataset = torchvision.datasets.CIFAR100(root=os.path.expanduser('~/dataset'), train=True, download=True,
+        CIFAR100 = dataset_with_indices(torchvision.datasets.CIFAR100)
+        train_dataset = CIFAR100(root=os.path.expanduser('~/dataset'), train=True, download=True,
                                                           transform=transform_train)
-        test_dataset = torchvision.datasets.CIFAR100(root=os.path.expanduser('~/dataset'), train=False, download=True,
+        test_dataset = CIFAR100(root=os.path.expanduser('~/dataset'), train=False, download=True,
                                                       transform=transform_val)
-        valid_dataset = torchvision.datasets.CIFAR100(root=os.path.expanduser('~/dataset'), train=False, download=True,
+        valid_dataset = CIFAR100(root=os.path.expanduser('~/dataset'), train=False, download=True,
                                                       transform=transform_val)
     else:
         train_dataset = AdvRgbImageDataset(train_file_path, reshape_size)
@@ -230,6 +231,22 @@ def get_loader(dataset, shuffle=False, order_labels=False, n_labels=None, batch_
     return DataLoader(sub_dataset, batch_size=batch_size, sampler=sampler, pin_memory=pin_memory)
 
 
+def get_indexes(dataset, data_batch):
+    """
+
+    Args:
+        dataset (Tensor):
+        data_batch (Tensor):
+
+    Returns:
+
+    """
+    dataset_data = torch.tensor(dataset.data[:][0])
+    indexes = torch.zeros(len(data_batch))
+    for i, item in enumerate(data_batch):
+        indexes[i] = (dataset_data == item).non_zero(as_tuple=True)
+    return indexes
+
 class PerLabelSampler(Sampler):
     r"""Samples elements ordered per label, always in the same order.
 
@@ -254,3 +271,18 @@ class PerLabelSampler(Sampler):
 
     def __len__(self):
         return len(self.data_source)
+
+
+def dataset_with_indices(cls):
+    """
+    Modifies the given Dataset class to return a tuple data, target, index
+    instead of just data, target.
+    """
+
+    def __getitem__(self, index):
+        data, target = cls.__getitem__(self, index)
+        return data, target, index
+
+    return type(cls.__name__, (cls,), {
+        '__getitem__': __getitem__,
+    })

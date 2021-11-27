@@ -7,6 +7,8 @@ class EmbeddingDataset(Dataset):
     def __init__(self, embeddings, labels, confidences, n_classes=None, transform=None):
         if n_classes is None:
             n_classes = len(labels)
+        if confidences is None:
+            confidences = torch.zeros(len(labels))
         self.data = embeddings[labels < n_classes]
         self.targets = labels[labels < n_classes]
         self.confidences = confidences[labels < n_classes]

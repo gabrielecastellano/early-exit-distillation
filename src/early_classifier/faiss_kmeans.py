@@ -4,6 +4,7 @@ import faiss
 
 from early_classifier.base import BaseClassifier
 from early_classifier.ee_dataset import EmbeddingDataset
+from utils import dataset_util
 
 
 class FaissKMeansClassifier(BaseClassifier):
@@ -25,6 +26,7 @@ class FaissKMeansClassifier(BaseClassifier):
         if type(threshold) == list:
             self.share_threshold = threshold[0]
         self.distances_q = None
+        self.dataset = None
 
     def fit(self, data_loader, epoch=0):
         """
@@ -36,6 +38,9 @@ class FaissKMeansClassifier(BaseClassifier):
         """
         if type(data_loader.dataset) != EmbeddingDataset:
             raise TypeError(f"Unexpected dataset type '{type(data_loader.dataset)}'")
+
+        self.dataset = data_loader.dataset
+
         x = data_loader.dataset.data
         y = data_loader.dataset.targets
         c = data_loader.dataset.confidences
@@ -49,6 +54,7 @@ class FaissKMeansClassifier(BaseClassifier):
         self.distances_q = np.percentile(norm_distances, (0, 0.25, 0.5, 0.75, 1))
 
         # compute per-cluster shares
+        self.confidence_share = {cluster: {label: [] for label in range(self.n_labels)} for cluster in range(self.k)}
         for cluster, target, confidence in zip(clusters, y, c):
             if cluster != -1:
                 if target < self.n_labels:
@@ -68,8 +74,7 @@ class FaissKMeansClassifier(BaseClassifier):
 
         # only keep clusters featuring more than one item
         self.valid_shares = [share for i, share in enumerate(self.shares) if self.cluster_sizes[i] > 1]
-        if self.share_threshold == 'auto':  # FIXME this does not work if we train back the model
-            self.share_threshold = np.quantile(self.valid_shares, 0.5)
+        self.set_threshold(self.share_threshold)
 
     def predict(self, x):
 
@@ -88,6 +93,20 @@ class FaissKMeansClassifier(BaseClassifier):
 
     def get_prediction_confidences(self, y):
         return torch.max(y, -1)[0]
+
+    def init_and_fit(self, dataset=None):
+        if dataset:
+            self.dataset = dataset
+        if self.dataset:
+            loader = dataset_util.get_loader(self.dataset, shuffle=True)
+            self.fit(loader)
+
+    def update_and_fit(self, data, indexes=None, epoch=0):
+        if self.dataset is not None:
+            for i, index in enumerate(indexes):
+                self.dataset.data[index] = data[i].cpu()
+            loader = dataset_util.get_loader(self.dataset, shuffle=True)
+            self.fit(loader, epoch=epoch)
 
     def get_threshold(self):
         return self.share_threshold
@@ -162,7 +181,7 @@ class FaissKMeansClassifier(BaseClassifier):
         return self
 
     def get_cls_loss(self, p, t):
-        return torch.nn.CrossEntropyLoss(p, t)
+        return torch.nn.modules.loss.CrossEntropyLoss()(p, t)
 
     def train(self):
         pass

@@ -19,16 +19,27 @@ class BaseClassifier:
 
     def predict(self, x):
         """
-
+        To be used just for evaluation.
         Args:
             x (Tensor): the batch of data to predict
 
-        Returns (float, int):
-            Tensor: array of predicted labels
-            Tensor: array of prediction confidences
+        Returns:
+            Tensor: array of predicted confidences per label
 
         """
         raise NotImplementedError('predict method must be implemented')
+
+    def forward(self, x):
+        """
+        Used in training, to be overridden only if should be different from the evaluation prediction.
+        Args:
+            x (Tensor): the batch of data to predict
+
+        Returns:
+            Tensor: array of predicted confidences per label
+
+        """
+        return self.predict(x)
 
     def get_threshold(self):
         """
@@ -37,6 +48,30 @@ class BaseClassifier:
 
         """
         raise NotImplementedError('predict method must be implemented')
+
+    def init_and_fit(self, dataset=None):
+        """
+        Should set and fit a new dataset only if the model is not optimized through a criterion.backward function.
+        Args:
+            dataset:
+
+        Returns:
+
+        """
+
+    def update_and_fit(self, data, indexes=None, epoch=0):
+        """
+        Changes a portion of the dataset and performs a new fit (should not do anything in case the model is optimized
+        through a criterion.backward function).
+        Args:
+            data:
+            indexes:
+            epoch:
+
+        Returns:
+
+        """
+        pass
 
     def init_results(self):
         return dict()
