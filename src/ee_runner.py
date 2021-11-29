@@ -10,7 +10,7 @@ import os
 import torch
 from pathlib import Path
 
-from torch import distributed as dist
+from torch import distributed as dist, norm
 from torch.backends import cudnn
 from torch.nn import DataParallel
 from torch.nn.parallel.distributed import DistributedDataParallel
@@ -42,7 +42,7 @@ def get_argparser():
     return argparser
 
 
-def save_ckpt(student_model, epoch, best_valid_value, ckpt_file_path, teacher_model_type):
+def save_ckpt(student_model, epoch, best_valid_value, ckpt_file_path, teacher_model_type, ee_model=None, ee_config=None):
     print('Saving..')
     module =\
         student_model.module if isinstance(student_model, (DataParallel, DistributedDataParallel)) else student_model
@@ -55,6 +55,11 @@ def save_ckpt(student_model, epoch, best_valid_value, ckpt_file_path, teacher_mo
     }
     file_util.make_parent_dirs(ckpt_file_path)
     torch.save(state, ckpt_file_path)
+    if ee_model is not None:
+        dname = ee_config['ckpt']
+        Path(dname).mkdir(parents=True, exist_ok=True)
+        ee_model_file = dname.format(ee_model.n_labels, ee_config['samples_fraction'], ee_model.key_param())
+        ee_model.save(ee_model_file)
 
 
 @torch.no_grad()
@@ -153,10 +158,18 @@ def evaluate(model, data_loader, device, ee_model=None, interval=1000, split_nam
     print(' * Acc@1 {:.4f}\tAcc@5 {:.4f}'.format(top1_accuracy, top5_accuracy))
     print(' * Fraction of early predictions {:.4f}'.format(early_predictions))
     torch.set_num_threads(num_threads)
+
+    # store results on disk
+    # TODO store them all in the same file (for all the thresholds)
+    dname = f'ee_stats/{ee_utils.get_model_type(ee_model.__class__)}/joint_stats'
+    Path(dname).mkdir(parents=True, exist_ok=True)
+    with open(f"{dname}/{title}_{time.strftime('%Y%m%d-%H%M%S')}.json", "w") as f:
+        json.dump({"accuracy": top1_accuracy, "early_predicted": early_predictions}, f)
+
     return metric_logger.acc1.global_avg
 
 
-def validate(student_model_without_ddp, data_loader, config, device, distributed, device_ids, ee_model, ee_threshold):
+def validate(student_model_without_ddp, data_loader, config, device, distributed, device_ids, ee_model):
     """
     Evaluate on the validation test after one distillation epoch.
     Args:
@@ -167,7 +180,6 @@ def validate(student_model_without_ddp, data_loader, config, device, distributed
         distributed:
         device_ids:
         ee_model (BaseClassifier):
-        ee_threshold:
 
     Returns:
 
@@ -179,11 +191,11 @@ def validate(student_model_without_ddp, data_loader, config, device, distributed
     mimic_model_without_dp = mimic_model.module if isinstance(mimic_model, DataParallel) else mimic_model
     if distributed:
         mimic_model = DistributedDataParallel(mimic_model_without_dp, device_ids=device_ids)
-    return evaluate(mimic_model, data_loader, device, ee_model=ee_model, ee_threshold=ee_threshold, split_name='Validation')
+    return evaluate(mimic_model, data_loader, device, ee_model=ee_model, split_name='Validation')
 
 
 def distill_one_epoch(student_model, teacher_model, teacher_input_size, student_input_size, train_loader, optimizer,
-                      criterion, epoch, device, interval, bn_shape, ee_model=None, ee_threshold='auto'):
+                      criterion, epoch, device, interval, bn_shape, ee_model=None):
     student_model.train()
     teacher_model.eval()
     metric_logger = MetricLogger(delimiter='  ')
@@ -212,7 +224,6 @@ def distill_one_epoch(student_model, teacher_model, teacher_input_size, student_
             student_outputs = student_model.forward_from_bn(bn_output)
             # update ee model
             ee_model.update_and_fit(embedding, indexes, epoch)
-            ee_model.set_threshold(ee_threshold)
             cls_loss = ee_model.get_cls_loss(ee_outputs, targets)
         else:
             student_outputs = student_model(student_upsampler(sample_batch))
@@ -228,7 +239,7 @@ def distill_one_epoch(student_model, teacher_model, teacher_input_size, student_
 
 
 def distill(train_loader, valid_loader, student_input_shape, teacher_input_shape, config, device, distributed,
-            device_ids, bn_shape, ee_model=None, ee_threshold='auto', ee_dataset=None):
+            device_ids, bn_shape, ee_model=None, ee_dataset=None):
     """
     Train the (head of a) student model by knowledge distillation from the teacher model.
     The student is stored in ckpt.
@@ -244,7 +255,6 @@ def distill(train_loader, valid_loader, student_input_shape, teacher_input_shape
         distributed:
         device_ids:
         ee_model (BaseClassifier):
-        ee_threshold:
 
     Returns:
 
@@ -255,8 +265,8 @@ def distill(train_loader, valid_loader, student_input_shape, teacher_input_shape
     student_model_config = config['student_model']
     student_model = mimic_util.get_student_model(teacher_model_type, student_model_config, config['dataset']['name'], student_input_shape[-1])
     student_model = student_model.to(device)
-    start_epoch, best_valid_acc = mimic_util.resume_from_ckpt(student_model_config['ckpt'], student_model, device,
-                                                              is_student=True)
+    start_epoch, best_valid_acc = mimic_util.resume_from_ckpt(student_model_config['ckpt'], student_model, device, is_student=True)
+    ee_config = config['ee_model']
     if best_valid_acc is None:
         best_valid_acc = 0.0
 
@@ -288,19 +298,18 @@ def distill(train_loader, valid_loader, student_input_shape, teacher_input_shape
             train_loader.sampler.set_epoch(epoch)
         # distill
         distill_one_epoch(student_model, teacher_model, student_input_shape[-1], teacher_input_shape[-1], train_loader,
-                          optimizer, criterion, epoch, device, interval, bn_shape, ee_model, ee_threshold)
+                          optimizer, criterion, epoch, device, interval, bn_shape, ee_model)
         # evaluate
-        ee_threshold = ee_model.get_threshold() if ee_threshold == 'auto' else ee_threshold
-        valid_acc = validate(student_model, valid_loader, config, device, distributed, device_ids, ee_model, ee_threshold)
+        valid_acc = validate(student_model, valid_loader, config, device, distributed, device_ids, ee_model)
         if valid_acc > best_valid_acc and main_util.is_main_process():
             print('Updating ckpt (Best top1 accuracy: {:.4f} -> {:.4f})'.format(best_valid_acc, valid_acc))
             best_valid_acc = valid_acc
-            save_ckpt(student_model_without_ddp, epoch, best_valid_acc, ckpt_file_path, teacher_model_type)
+            save_ckpt(student_model_without_ddp, epoch, best_valid_acc, ckpt_file_path, teacher_model_type, ee_model=ee_model, ee_config=ee_config)
         scheduler.step()
         # fit the ee model to the new embeddings
         ee_model.init_and_fit()
 
-    dist.barrier()
+    # dist.barrier()
     total_time = time.time() - start_time
     total_time_str = str(datetime.timedelta(seconds=int(total_time)))
     print('Training time {}'.format(total_time_str))
@@ -308,11 +317,12 @@ def distill(train_loader, valid_loader, student_input_shape, teacher_input_shape
     del student_model
 
 
-def get_embeddings(dataset, model, input_shape, device, bn_shape, fraction_of_samples=1.0, interval=10,
+def get_embeddings(dataset, model, input_shape, device, bn_shape, fraction_of_samples=1.0, interval=10, scale=1.0,
                    split_name='Get Embeddings', load_from_storage=False, store=False, embedding_storage=None):
     """
 
     Args:
+        scale:
         bn_shape:
         dataset:
         model (models.mimic.base.BaseMimic):
@@ -352,7 +362,8 @@ def get_embeddings(dataset, model, input_shape, device, bn_shape, fraction_of_sa
             img_ctr = 0
             for img_ctr_wide in range(overall_samples):
                 if img_ctr_wide % overall_samples_per_class < used_samples_per_class:
-                    cache_data[img_ctr] = torch.load(f'{embedding_storage}/embedding_{img_ctr_wide}.sav')
+                    embedding = torch.load(f'{embedding_storage}/embedding_{img_ctr_wide}.sav')
+                    cache_data[img_ctr] = embedding
                     img_ctr += 1
         except FileNotFoundError as ex:
             load_from_storage = False
@@ -516,7 +527,7 @@ def evaluate_ee_model(ee_model, mimic_model, data_loader, device, interval=100, 
         confidence_threshold = 0
     else:
         confidence_threshold = ee_model.get_threshold()
-    split_name = 'Evaluate EE t={}'.format(ee_model.get_threshold())
+    split_name = 'Evaluate EE t={}'.format(ee_model.get_threshold(normalized=False))
     header = '{}:'.format(split_name)
 
     num_threads = torch.get_num_threads()
@@ -645,9 +656,9 @@ def run(args):
         ee_model = None
         if args.ee_joint_train:
             ee_model = early_classifier.ee_utils.get_ee_model(ee_config, device, bn_shape, pre_trained=False)
+            ee_model.set_threshold(ee_config['thresholds'][0])
         distill(train_loader, valid_loader, student_input_shape, teacher_input_shape, config, device, distributed,
-                device_ids, bn_shape, ee_model=ee_model, ee_threshold=ee_config['thresholds'][0],
-                ee_dataset=ee_train_dataset)
+                device_ids, bn_shape, ee_model=ee_model, ee_dataset=ee_train_dataset)
 
     # Train the early exit model starting from an already trained student model
     if args.ee_solo_train:

@@ -25,6 +25,7 @@ class FaissKMeansClassifier(BaseClassifier):
         self.share_threshold = threshold
         if type(threshold) == list:
             self.share_threshold = threshold[0]
+        self.share_threshold = self.share_threshold if self.share_threshold != 'auto' else 0.5
         self.distances_q = None
         self.dataset = None
 
@@ -74,7 +75,6 @@ class FaissKMeansClassifier(BaseClassifier):
 
         # only keep clusters featuring more than one item
         self.valid_shares = [share for i, share in enumerate(self.shares) if self.cluster_sizes[i] > 1]
-        self.set_threshold(self.share_threshold)
 
     def predict(self, x):
 
@@ -108,14 +108,17 @@ class FaissKMeansClassifier(BaseClassifier):
             loader = dataset_util.get_loader(self.dataset, shuffle=True)
             self.fit(loader, epoch=epoch)
 
-    def get_threshold(self):
-        return self.share_threshold
+    def get_threshold(self, normalized=True):
+        if normalized:
+            return np.quantile(self.valid_shares, self.share_threshold)
+        else:
+            return self.share_threshold
 
     def set_threshold(self, threshold):
         if threshold != 'auto':
-            self.share_threshold = np.quantile(self.valid_shares, threshold)
+            self.share_threshold = threshold
         else:
-            self.share_threshold = np.quantile(self.valid_shares, 0.5)
+            self.share_threshold = 0.5
 
     def init_results(self):
         d = dict()
@@ -124,7 +127,7 @@ class FaissKMeansClassifier(BaseClassifier):
         return d
 
     def key_param(self):
-        return self.k
+        return int(self.k / self.n_labels)
 
     def to_state_dict(self):
         model_dict = dict({
