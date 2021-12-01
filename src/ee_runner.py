@@ -10,7 +10,6 @@ import os
 import torch
 from pathlib import Path
 
-from torch import distributed as dist, norm
 from torch.backends import cudnn
 from torch.nn import DataParallel
 from torch.nn.parallel.distributed import DistributedDataParallel
@@ -44,8 +43,7 @@ def get_argparser():
 
 def save_ckpt(student_model, epoch, best_valid_value, ckpt_file_path, teacher_model_type, ee_model=None, ee_config=None):
     print('Saving..')
-    module =\
-        student_model.module if isinstance(student_model, (DataParallel, DistributedDataParallel)) else student_model
+    module = student_model.module if isinstance(student_model, (DataParallel, DistributedDataParallel)) else student_model
     state = {
         'type': teacher_model_type,
         'model': module.state_dict(),
@@ -57,8 +55,8 @@ def save_ckpt(student_model, epoch, best_valid_value, ckpt_file_path, teacher_mo
     torch.save(state, ckpt_file_path)
     if ee_model is not None:
         dname = ee_config['ckpt']
-        Path(dname).mkdir(parents=True, exist_ok=True)
         ee_model_file = dname.format(ee_model.n_labels, ee_config['samples_fraction'], ee_model.key_param())
+        file_util.make_parent_dirs(ckpt_file_path)
         ee_model.save(ee_model_file)
 
 
@@ -115,6 +113,8 @@ def evaluate(model, data_loader, device, ee_model=None, interval=1000, split_nam
             image = image.to(model.device, non_blocking=True)
             target = target.to(model.device, non_blocking=True)
 
+            batch_size = image.shape[0]
+
             if not ee_model:
                 output = model(image)
                 new_early_exits = 0
@@ -132,7 +132,7 @@ def evaluate(model, data_loader, device, ee_model=None, interval=1000, split_nam
                 # c, p = torch.max(torch.nn.functional.softmax(ee_output[i], dim=0), 0)
                 # full_predictions = bn_output[ee_output < ee_threshold].gpu()
                 full_predictions = bn_output[ee_conf < ee_model.get_threshold()]
-                new_early_exits = data_loader.batch_size - full_predictions.shape[0]
+                new_early_exits = batch_size - full_predictions.shape[0]
                 output = ee_output.to(model.device)
                 # early_exit_ctr += new_early_exits
 
@@ -145,12 +145,15 @@ def evaluate(model, data_loader, device, ee_model=None, interval=1000, split_nam
                             output[i] = full_output[j]
                             j += 1
 
-            acc1, acc5 = main_util.compute_accuracy(output, target, topk=(1, 5))
-            metric_logger.meters['acc1'].update(acc1.item(), n=data_loader.batch_size)
-            metric_logger.meters['acc5'].update(acc5.item(), n=data_loader.batch_size)
-            metric_logger.counters['early_predictions'].update(new_early_exits, data_loader.batch_size)
+                if ee_model.get_threshold() == 1 and new_early_exits > 0:
+                    print(new_early_exits)
 
-    # gather the stats from all processes
+            acc1, acc5 = main_util.compute_accuracy(output, target, topk=(1, 5))
+            metric_logger.meters['acc1'].update(acc1.item(), n=batch_size)
+            metric_logger.meters['acc5'].update(acc5.item(), n=batch_size)
+            metric_logger.counters['early_predictions'].update(new_early_exits, batch_size)
+
+    # gather the solo_train-solo_eval from all processes
     metric_logger.synchronize_between_processes()
     top1_accuracy = metric_logger.acc1.global_avg
     top5_accuracy = metric_logger.acc5.global_avg
@@ -159,14 +162,12 @@ def evaluate(model, data_loader, device, ee_model=None, interval=1000, split_nam
     print(' * Fraction of early predictions {:.4f}'.format(early_predictions))
     torch.set_num_threads(num_threads)
 
-    # store results on disk
-    # TODO store them all in the same file (for all the thresholds)
-    dname = f'ee_stats/{ee_utils.get_model_type(ee_model.__class__)}/joint_stats'
-    Path(dname).mkdir(parents=True, exist_ok=True)
-    with open(f"{dname}/{title}_{time.strftime('%Y%m%d-%H%M%S')}.json", "w") as f:
-        json.dump({"accuracy": top1_accuracy, "early_predicted": early_predictions}, f)
+    results = ee_model.init_results()
+    results['overall_accuracy'] = top1_accuracy
+    results['confident_accuracy'] = top1_accuracy
+    results['coverage'] = early_predictions
 
-    return metric_logger.acc1.global_avg
+    return results
 
 
 def validate(student_model_without_ddp, data_loader, config, device, distributed, device_ids, ee_model):
@@ -191,7 +192,9 @@ def validate(student_model_without_ddp, data_loader, config, device, distributed
     mimic_model_without_dp = mimic_model.module if isinstance(mimic_model, DataParallel) else mimic_model
     if distributed:
         mimic_model = DistributedDataParallel(mimic_model_without_dp, device_ids=device_ids)
-    return evaluate(mimic_model, data_loader, device, ee_model=ee_model, split_name='Validation')
+    ee_accuracy = evaluate(mimic_model, data_loader, device, ee_model=ee_model, split_name='EE Validation')["overall_accuracy"]
+    mimic_accuracy = evaluate(mimic_model, data_loader, device, split_name='Mimic Validation')["overall_accuracy"]
+    return (ee_accuracy + mimic_accuracy) / 2
 
 
 def distill_one_epoch(student_model, teacher_model, teacher_input_size, student_input_size, train_loader, optimizer,
@@ -227,9 +230,8 @@ def distill_one_epoch(student_model, teacher_model, teacher_input_size, student_
             cls_loss = ee_model.get_cls_loss(ee_outputs, targets)
         else:
             student_outputs = student_model(student_upsampler(sample_batch))
-        # TODO use the embedding for joint training (loss should be affected by early classification)
         rec_loss = criterion(student_outputs, teacher_outputs)
-        loss = rec_loss + 2000*cls_loss
+        loss = rec_loss + 50000*cls_loss
 
         loss.backward()
         optimizer.step()
@@ -239,12 +241,11 @@ def distill_one_epoch(student_model, teacher_model, teacher_input_size, student_
 
 
 def distill(train_loader, valid_loader, student_input_shape, teacher_input_shape, config, device, distributed,
-            device_ids, bn_shape, ee_model=None, ee_dataset=None):
+            device_ids, bn_shape, ee_model=None):
     """
     Train the (head of a) student model by knowledge distillation from the teacher model.
     The student is stored in ckpt.
     Args:
-        ee_dataset:
         bn_shape:
         train_loader:
         valid_loader:
@@ -265,8 +266,8 @@ def distill(train_loader, valid_loader, student_input_shape, teacher_input_shape
     student_model_config = config['student_model']
     student_model = mimic_util.get_student_model(teacher_model_type, student_model_config, config['dataset']['name'], student_input_shape[-1])
     student_model = student_model.to(device)
-    start_epoch, best_valid_acc = mimic_util.resume_from_ckpt(student_model_config['ckpt'], student_model, device, is_student=True)
-    ee_config = config['ee_model']
+    start_epoch, best_valid_acc = mimic_util.resume_from_ckpt(student_model_config['ckpt'], student_model, device,
+                                                              is_student=True)
     if best_valid_acc is None:
         best_valid_acc = 0.0
 
@@ -292,7 +293,16 @@ def distill(train_loader, valid_loader, student_input_shape, teacher_input_shape
     ckpt_file_path = student_model_config['ckpt']
     end_epoch = start_epoch + train_config['epoch']
     start_time = time.time()
-    ee_model.init_and_fit(ee_dataset)
+
+    # build initial embedding cache for early exit
+    if ee_model:
+        print("Initializing cache for early exit joint training...")
+        cache_data, cache_labels, _, cache_confidences = get_embeddings(train_loader.dataset, config, device,
+                                                                        fraction_of_samples=1.0,
+                                                                        load_from_storage=False,
+                                                                        store=False)
+        ee_train_dataset = EmbeddingDataset(cache_data, cache_labels, cache_confidences)
+        ee_model.init_and_fit(ee_train_dataset)
     for epoch in range(start_epoch, end_epoch):
         if distributed:
             train_loader.sampler.set_epoch(epoch)
@@ -304,7 +314,7 @@ def distill(train_loader, valid_loader, student_input_shape, teacher_input_shape
         if valid_acc > best_valid_acc and main_util.is_main_process():
             print('Updating ckpt (Best top1 accuracy: {:.4f} -> {:.4f})'.format(best_valid_acc, valid_acc))
             best_valid_acc = valid_acc
-            save_ckpt(student_model_without_ddp, epoch, best_valid_acc, ckpt_file_path, teacher_model_type, ee_model=ee_model, ee_config=ee_config)
+            save_ckpt(student_model_without_ddp, epoch, best_valid_acc, ckpt_file_path, teacher_model_type, ee_model=ee_model, ee_config=config["ee_model"])
         scheduler.step()
         # fit the ee model to the new embeddings
         ee_model.init_and_fit()
@@ -317,16 +327,14 @@ def distill(train_loader, valid_loader, student_input_shape, teacher_input_shape
     del student_model
 
 
-def get_embeddings(dataset, model, input_shape, device, bn_shape, fraction_of_samples=1.0, interval=10, scale=1.0,
+def get_embeddings(dataset, config, device, fraction_of_samples=1.0, interval=10, scale=1.0,
                    split_name='Get Embeddings', load_from_storage=False, store=False, embedding_storage=None):
     """
 
     Args:
+        config:
         scale:
-        bn_shape:
         dataset:
-        model (models.mimic.base.BaseMimic):
-        input_shape:
         device:
         fraction_of_samples:
         interval:
@@ -338,6 +346,11 @@ def get_embeddings(dataset, model, input_shape, device, bn_shape, fraction_of_sa
     Returns:
 
     """
+
+    org_model, teacher_model_type = mimic_util.get_org_model(config["teacher_model"], device)
+    model = mimic_util.get_mimic_model(config, org_model, teacher_model_type, config["teacher_model"], device)
+    bn_shape = model.head.bn_shape(config["input_shape"], device)
+
     overall_samples = len(dataset)
     overall_classes = max(dataset.targets) + 1
     overall_samples_per_class = overall_samples / overall_classes
@@ -506,11 +519,13 @@ def train_ee_model(mimic_model, ee_config, samples_fraction_per_class, train_dat
     ee_model_file = dname.format(n_labels, samples_fraction_per_class, ee_model.key_param())
     ee_model.save(ee_model_file)
 
+    '''
     # store results on disk
-    dname = f'ee_stats/{ee_type}/stats'
+    dname = f'ee_stats/{ee_type}/solo_train'
     Path(dname).mkdir(parents=True, exist_ok=True)
     with open(f"{dname}/{experiment_name}_{time.strftime('%Y%m%d-%H%M%S')}.json", "w") as f:
         json.dump(results, f)
+    '''
 
 def evaluate_ee_model(ee_model, mimic_model, data_loader, device, interval=100, use_threshold=True):
 
@@ -538,6 +553,7 @@ def evaluate_ee_model(ee_model, mimic_model, data_loader, device, interval=100, 
     for embeddings, target in metric_logger.log_every(data_loader, interval, header):
         embeddings = embeddings.to(mimic_model.device, non_blocking=True)
         target = target.to(device, non_blocking=True)
+        batch_size = embeddings.shape[0]
         if any([t > ee_model.n_labels - 1 for t in target]):
             break
 
@@ -562,15 +578,15 @@ def evaluate_ee_model(ee_model, mimic_model, data_loader, device, interval=100, 
         early_predictions = confident_output.shape[0]
         acc1, acc5 = main_util.compute_accuracy(ee_output, target, topk=(1, 5))
         acc1_c, acc5_c = main_util.compute_accuracy(confident_output, confident_targets, topk=(1, 5))
-        metric_logger.meters['ee_acc1'].update(acc1.item(), n=data_loader.batch_size)
-        metric_logger.meters['ee_acc5'].update(acc5.item(), n=data_loader.batch_size)
+        metric_logger.meters['ee_acc1'].update(acc1.item(), n=batch_size)
+        metric_logger.meters['ee_acc5'].update(acc5.item(), n=batch_size)
         metric_logger.meters['ee_acc1_c'].update(acc1_c.item(), n=early_predictions)
         metric_logger.meters['ee_acc5_c'].update(acc5_c.item(), n=early_predictions)
-        metric_logger.counters['early_predictions'].update(early_predictions, data_loader.batch_size)
+        metric_logger.counters['early_predictions'].update(early_predictions, batch_size)
 
     torch.set_num_threads(num_threads)
 
-    # gather the stats from all processes
+    # gather the solo_train-solo_eval from all processes
     metric_logger.synchronize_between_processes()
     top1_accuracy = metric_logger.ee_acc1.global_avg
     top5_accuracy = metric_logger.ee_acc5.global_avg
@@ -593,7 +609,7 @@ def evaluate_ee_model(ee_model, mimic_model, data_loader, device, interval=100, 
     results = ee_model.init_results()
     results['overall_accuracy'] = top1_accuracy
     results['confident_accuracy'] = top1_accuracy_c
-    results['predicted'] = early_predictions
+    results['coverage'] = early_predictions
     results['performance'] = performance_metric
 
     return results
@@ -617,11 +633,15 @@ def run(args):
 
     ee_config = config['ee_model']
     fraction_of_samples_per_class = ee_config['samples_fraction']
-    load_embeddings = ee_config['load_embeddings']
+    load_embeddings = ee_config['load_embeddings'] if not args.bn_train else False
     store_embeddings = ee_config['store_embeddings']
     embeddings_storage = ee_config['storage']
     ee_device = torch.device(ee_config['device'] if torch.cuda.is_available() else 'cpu')
     ee_config['thresholds'] = ee_config['thresholds'] if type(ee_config['thresholds']) == list else [ee_config['thresholds']]
+
+    org_model, teacher_model_type = mimic_util.get_org_model(teacher_model_config, device)
+    mimic_model = mimic_util.get_mimic_model(config, org_model, teacher_model_type, teacher_model_config, device)
+    bn_shape = mimic_model.head.bn_shape(student_input_shape, device)
 
     # Build datasets and loaders for full model
     input_shape = teacher_input_shape if teacher_input_shape[-1] > student_input_shape[-1] else student_input_shape
@@ -633,32 +653,28 @@ def run(args):
     valid_loader = dataset_util.get_loader(valid_dataset, shuffle=False, batch_size=test_config['batch_size'], pin_memory=pin_memory)
     test_loader = dataset_util.get_loader(test_dataset, shuffle=False, batch_size=test_config['batch_size'], pin_memory=pin_memory)
 
-    # Generate embedding datasets
-    org_model, teacher_model_type = mimic_util.get_org_model(teacher_model_config, device)
-    mimic_model = mimic_util.get_mimic_model(config, org_model, teacher_model_type, teacher_model_config, device)
-    bn_shape = mimic_model.head.bn_shape(student_input_shape, device)
-    cache_data, cache_labels, _, cache_confidences = get_embeddings(train_dataset, mimic_model,
-                                                                    student_input_shape, device, bn_shape,
-                                                                    fraction_of_samples=1.0,
-                                                                    load_from_storage=load_embeddings,
-                                                                    store=store_embeddings,
-                                                                    embedding_storage=embeddings_storage)
-    valid_data, _, valid_labels, valid_confidences = get_embeddings(valid_dataset, mimic_model,
-                                                                    student_input_shape, device, bn_shape,
-                                                                    fraction_of_samples=1.0,
-                                                                    load_from_storage=False,
-                                                                    store=False)
-    ee_train_dataset = EmbeddingDataset(cache_data, cache_labels, cache_confidences)
-    ee_valid_dataset = EmbeddingDataset(valid_data, valid_labels, valid_confidences)
-
     # Train mimic model through distillation from the original model
     if args.bn_train:
         ee_model = None
         if args.ee_joint_train:
             ee_model = early_classifier.ee_utils.get_ee_model(ee_config, device, bn_shape, pre_trained=False)
             ee_model.set_threshold(ee_config['thresholds'][0])
+            ee_model.jointly_trained = True
         distill(train_loader, valid_loader, student_input_shape, teacher_input_shape, config, device, distributed,
-                device_ids, bn_shape, ee_model=ee_model, ee_dataset=ee_train_dataset)
+                device_ids, bn_shape, ee_model=ee_model)
+
+    # Generate embedding datasets
+    cache_data, cache_labels, _, cache_confidences = get_embeddings(train_dataset, config, device,
+                                                                    fraction_of_samples=1.0,
+                                                                    load_from_storage=load_embeddings,
+                                                                    store=store_embeddings,
+                                                                    embedding_storage=embeddings_storage)
+    valid_data, _, valid_labels, valid_confidences = get_embeddings(valid_dataset, config, device,
+                                                                    fraction_of_samples=1.0,
+                                                                    load_from_storage=False,
+                                                                    store=False)
+    ee_train_dataset = EmbeddingDataset(cache_data, cache_labels, cache_confidences)
+    ee_valid_dataset = EmbeddingDataset(valid_data, valid_labels, valid_confidences)
 
     # Train the early exit model starting from an already trained student model
     if args.ee_solo_train:
@@ -685,9 +701,17 @@ def run(args):
     ee_model = ee_utils.get_ee_model(ee_config, device, bn_shape, pre_trained=True)
     if ee_model:
         ee_valid_loader = dataset_util.get_loader(ee_valid_dataset, shuffle=False, n_labels=ee_model.n_labels)
+        results = dict()
         for threshold in ee_config['thresholds']:
             ee_model.set_threshold(threshold)
-            evaluate_ee_model(ee_model, mimic_model, ee_valid_loader, ee_device, use_threshold=True)
+            r = evaluate_ee_model(ee_model, mimic_model, ee_valid_loader, ee_device, use_threshold=True)
+            results[threshold] = r
+        # store results on disk
+        results = {f"{ee_model.n_labels}:{fraction_of_samples_per_class}": {ee_model.key_param(): results}}
+        dname = f'ee_stats/{ee_config["type"]}/{"joint_train-solo_train-joint_eval" if ee_model.jointly_trained else "solo_train"}-solo_eval'
+        Path(dname).mkdir(parents=True, exist_ok=True)
+        with open(f"{dname}/{ee_config['experiment']}_{time.strftime('%Y%m%d-%H%M%S')}.json", "w") as f:
+            json.dump(results, f)
 
     # Test jointly mimic model with early exit model
     mimic_model = mimic_util.get_mimic_model(config, org_model, teacher_model_type, teacher_model_config, device)
@@ -696,9 +720,17 @@ def run(args):
     if distributed:
         mimic_model = DistributedDataParallel(mimic_model_without_dp, device_ids=device_ids)
     if ee_model and ee_model.n_labels == mimic_model.out_features:
+        joint_results = dict()
         for threshold in ee_config['thresholds']:
             ee_model.set_threshold(threshold)
-            evaluate(mimic_model, test_loader, device, ee_model=ee_model, title=f'[BN_EE model - t={threshold}]')
+            r = evaluate(mimic_model, test_loader, device, ee_model=ee_model, title=f'[BN_EE model - t={threshold}]')
+            joint_results[threshold] = r
+        # store results on disk
+        joint_results = {f"{ee_model.n_labels}:{fraction_of_samples_per_class}": {ee_model.key_param(): joint_results}}
+        dname = f'ee_stats/{ee_config["type"]}/{"joint_train-solo_train-joint_eval" if ee_model.jointly_trained else "solo_train"}-solo_train-joint_eval'
+        Path(dname).mkdir(parents=True, exist_ok=True)
+        with open(f"{dname}/{ee_config['experiment']}_{time.strftime('%Y%m%d-%H%M%S')}.json", "w") as f:
+            json.dump(joint_results, f)
 
 
 if __name__ == '__main__':
