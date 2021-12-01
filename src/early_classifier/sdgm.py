@@ -100,7 +100,8 @@ class SDGMClassifier(BaseClassifier):
             'threshold': self.threshold,
             'device': self.device,
             'min_c': self.min_c,
-            'max_c': self.max_c
+            'max_c': self.max_c,
+            'jointly_trained': self.jointly_trained
         })
         return model_dict
 
@@ -117,6 +118,7 @@ class SDGMClassifier(BaseClassifier):
         self.threshold = model_dict['threshold']
         self.min_c = model_dict['min_c']
         self.max_c = model_dict['max_c']
+        self.jointly_trained = model_dict['jointly_trained']
 
     def save(self, filename):
         model_dict = self.to_state_dict()

@@ -5,3 +5,5 @@ resource/
 archive/
 ref/
 data/
+/plots/
+/ee_stats/

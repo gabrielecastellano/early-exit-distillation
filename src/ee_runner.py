@@ -162,7 +162,7 @@ def evaluate(model, data_loader, device, ee_model=None, interval=1000, split_nam
     print(' * Fraction of early predictions {:.4f}'.format(early_predictions))
     torch.set_num_threads(num_threads)
 
-    results = ee_model.init_results()
+    results = ee_model.init_results() if ee_model else dict()
     results['overall_accuracy'] = top1_accuracy
     results['confident_accuracy'] = top1_accuracy
     results['coverage'] = early_predictions
@@ -586,7 +586,7 @@ def evaluate_ee_model(ee_model, mimic_model, data_loader, device, interval=100, 
 
     torch.set_num_threads(num_threads)
 
-    # gather the solo_train-solo_eval from all processes
+    # gather the stats from all processes
     metric_logger.synchronize_between_processes()
     top1_accuracy = metric_logger.ee_acc1.global_avg
     top5_accuracy = metric_logger.ee_acc5.global_avg

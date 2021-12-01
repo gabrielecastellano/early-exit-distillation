@@ -94,7 +94,7 @@ class KMeansClassifier(BaseClassifier):
         return d
 
     def key_param(self):
-        return self.k
+        return self.k / self.n_labels
 
     def to_state_dict(self):
         model_dict = dict({
@@ -105,7 +105,8 @@ class KMeansClassifier(BaseClassifier):
                 'max_labels': self.max_labels,
                 'shares': self.shares,
                 'valid_shares': self.valid_shares,
-                'share_threshold': self.share_threshold
+                'share_threshold': self.share_threshold,
+                'jointly_trained': self.jointly_trained
             }
         })
         return  model_dict
@@ -120,6 +121,7 @@ class KMeansClassifier(BaseClassifier):
         self.shares = model_dict['metadata']['shares']
         self.valid_shares = model_dict['metadata']['valid_shares']
         self.share_threshold = model_dict['metadata']['share_threshold']
+        self.jointly_trained = model_dict['metadata']['jointly_trained']
 
     def save(self, filename):
         model_dict = self.to_state_dict()

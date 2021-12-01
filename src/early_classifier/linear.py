@@ -58,7 +58,7 @@ class LinearClassifier(BaseClassifier):
 
     def go_ramen(self):
         pass
-    def get_threshold(self):
+    def get_threshold(self, normalized=True):
         return self.threshold
 
     def set_threshold(self, threshold):
@@ -80,7 +80,8 @@ class LinearClassifier(BaseClassifier):
             'n_labels': self.n_labels,
             'batch_size': self.batch_size,
             'threshold': self.threshold,
-            'device': self.device
+            'device': self.device,
+            'jointly_trained': self.jointly_trained
         })
         return model_dict
 
@@ -94,6 +95,7 @@ class LinearClassifier(BaseClassifier):
         self.n_labels = model_dict['n_labels']
         self.batch_size = model_dict['batch_size']
         self.threshold = model_dict['threshold']
+        self.jointly_trained = model_dict['jointly_trained']
 
     def save(self, filename):
         model_dict = self.to_state_dict()

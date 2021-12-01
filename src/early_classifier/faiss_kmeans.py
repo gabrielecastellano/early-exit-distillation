@@ -122,7 +122,7 @@ class FaissKMeansClassifier(BaseClassifier):
 
     def init_results(self):
         d = dict()
-        d['shares'] = self.valid_shares
+        # d['shares'] = self.valid_shares
         d['shares_mean'] = np.mean(self.valid_shares)
         return d
 
@@ -144,7 +144,8 @@ class FaissKMeansClassifier(BaseClassifier):
                 'shares': self.shares,
                 'valid_shares': self.valid_shares,
                 'share_threshold': self.share_threshold,
-                'distances_q': self.distances_q
+                'distances_q': self.distances_q,
+                'jointly_trained': self.jointly_trained
             }
         })
         return  model_dict
@@ -166,6 +167,7 @@ class FaissKMeansClassifier(BaseClassifier):
         self.valid_shares = model_dict['metadata']['valid_shares']
         self.share_threshold = model_dict['metadata']['share_threshold']
         self.distances_q = model_dict['metadata']['distances_q']
+        self.jointly_trained = model_dict['metadata']['jointly_trained']
 
     def save(self, filename):
         model_dict = self.to_state_dict()

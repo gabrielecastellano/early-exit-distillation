@@ -4,6 +4,7 @@ class BaseClassifier:
         self.model = None
         self.device = device
         self.n_labels = n_labels
+        self.jointly_trained = False
 
     def fit(self, data_loader, epoch=0):
         """
@@ -41,7 +42,7 @@ class BaseClassifier:
         """
         return self.predict(x)
 
-    def get_threshold(self):
+    def get_threshold(self, normalized=True):
         """
 
         Returns: Basic classification threshold value
