@@ -19,6 +19,7 @@ class GMML(nn.Module):
         """
         super(GMML, self).__init__(**kwargs)
         assert input_dim > 0
+        assert d > 0
         assert n_class > 1
         assert n_component > 0
         assert cov_type in ["diag", "full", "tril"]
@@ -35,8 +36,8 @@ class GMML(nn.Module):
         #else:
         #    self.H = int(self.input_dim * (self.input_dim + 3) / 2)
         # Parameters
-        self.bottleneck = nn.Identity() # nn.Linear(self.input_dim, self.d)
-        self.mu_p = Parameter(torch.rand(self.s, self.g, self.d) - 0.5, requires_grad=True)
+        self.bottleneck = nn.Identity() #nn.Linear(self.input_dim, self.d, bias=False)
+        self.mu_p = Parameter(torch.zeros(self.s, self.g, self.d), requires_grad=True)
         self.omega_p = Parameter(torch.randn(self.s, self.g), requires_grad=True)
         self._last_log_likelihood = None
         if True: # self.cov_type == "full":
@@ -55,15 +56,12 @@ class GMML(nn.Module):
             #     self.sigma_p[:, :, [round(2*n + n*(n-1)/2) for n in range(self.d)]] = 1
         '''
         # Enforced parameters
-        self.mu = None
-        self.sigma = None
-        self.omega = None
         self.distributions = {node: {0: None} for node in range(self.s)}
         with torch.no_grad():
             self.parameter_enforcing()
 
     def forward(self, x):
-        output = torch.zeros(x.shape[0], self.s)
+        output = torch.zeros(x.shape[0], self.s).to(self.sigma_p.device)
         x = self.bottleneck(x)
         for node in range(self.s):
             distribution = self.distributions[node][0]
@@ -75,17 +73,18 @@ class GMML(nn.Module):
         # SIGMA - symmetric positive definite
         # with torch.no_grad():
         #     self.sigma_p[self.sigma_p < 2e-04] = 0
-        tli = torch.tril_indices(row=self.sigma_p.size(-2), col=self.sigma_p.size(-1), offset=-1)
-        tui = torch.triu_indices(row=self.sigma_p.size(-2), col=self.sigma_p.size(-1), offset=1)
+        device = self.sigma_p.device
+        tli = torch.tril_indices(row=self.sigma_p.size(-2), col=self.sigma_p.size(-1), offset=-1).to(device)
+        tui = torch.triu_indices(row=self.sigma_p.size(-2), col=self.sigma_p.size(-1), offset=1).to(device)
         if True: #self.cov_type == "full":
             sigma_p = self.sigma_p
-            m = torch.matmul(sigma_p.transpose(-2, -1), sigma_p)
-            self.sigma = m + 0.01*torch.mean(torch.linalg.eig(m).eigenvalues.real, dim=-1, keepdim=True)*torch.eye(self.d)
+            m = torch.matmul(sigma_p.transpose(-2, -1), sigma_p).to(device)
+            sigma = m + 0.01*torch.mean(torch.linalg.eig(m).eigenvalues.real, dim=-1, keepdim=True)*torch.eye(self.d).to(device)
         if self.cov_type == "diag":
-            self.sigma[:, :, tli[0], tli[1]] = 0
-            self.sigma[:, :, tui[0], tui[1]] = 0
+            sigma[:, :, tli[0], tli[1]] = 0
+            sigma[:, :, tui[0], tui[1]] = 0
         elif self.cov_type == "tril":
-            self.sigma[:, :, tui[0], tui[1]] = 0
+            sigma[:, :, tui[0], tui[1]] = 0
         '''
         if self.cov_type == "diag":
             sigma_p = torch.diag_embed(self.sigma_p)
@@ -99,14 +98,14 @@ class GMML(nn.Module):
             self.sigma[:, :, ti[0], ti[1]] = self.sigma_p_l
         '''
         # MU - no transformation
-        self.mu = self.mu_p
+        mu = self.mu_p
         # OMEGA - should sum up to 1
-        self.omega = torch.softmax(self.omega_p, -1)
+        omega = torch.softmax(self.omega_p, -1)
         for node in range(self.s):
             if self.cov_type == "tril":
-                self.distributions[node][0] = MultivariateNormal(self.mu[node][0], scale_tril=self.sigma[node][0])
+                self.distributions[node][0] = MultivariateNormal(mu[node][0], scale_tril=sigma[node][0])
             else:
-                self.distributions[node][0] = MultivariateNormal(self.mu[node][0], covariance_matrix=self.sigma[node][0])
+                self.distributions[node][0] = MultivariateNormal(mu[node][0], covariance_matrix=sigma[node][0])
 
 
 def zero_grad_hook(cov_type):
