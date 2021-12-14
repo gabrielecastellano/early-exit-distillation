@@ -35,6 +35,7 @@ class SDGMClassifier(BaseClassifier):
             sample_batch, targets = sample_batch.to(self.device), targets.to(self.device)
             self.optimizer.zero_grad()
 
+            # FIXME this reduces the embedding size for computational feasibility
             sample_batch = sample_batch.reshape((sample_batch.shape[0], 6, 17, 17))
             sample_batch = downsampler(sample_batch)
             sample_batch = sample_batch.reshape((sample_batch.shape[0], self.embedding_size))

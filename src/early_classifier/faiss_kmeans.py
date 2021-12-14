@@ -167,7 +167,7 @@ class FaissKMeansClassifier(BaseClassifier):
         self.valid_shares = model_dict['metadata']['valid_shares']
         self.share_threshold = model_dict['metadata']['share_threshold']
         self.distances_q = model_dict['metadata']['distances_q']
-        self.jointly_trained = model_dict['metadata']['jointly_trained']
+        self.jointly_trained = False  #model_dict['metadata']['jointly_trained']
 
     def save(self, filename):
         model_dict = self.to_state_dict()
@@ -176,9 +176,6 @@ class FaissKMeansClassifier(BaseClassifier):
     def load(self, filename):
         model_dict = np.load(f"{filename}.npy", allow_pickle=True).item()
         self.from_state_dict(model_dict)
-
-    def eval(self):
-        pass
 
     def to(self, device):
         self.device = device
