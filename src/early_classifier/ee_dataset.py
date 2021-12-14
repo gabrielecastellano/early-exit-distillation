@@ -5,6 +5,15 @@ from torch.utils.data import Dataset
 class EmbeddingDataset(Dataset):
 
     def __init__(self, embeddings, labels, confidences, n_classes=None, transform=None):
+        """
+
+        Args:
+            embeddings (torch.Tensor):
+            labels (torch.Tensor):
+            confidences (torch.Tensor):
+            n_classes:
+            transform:
+        """
         if n_classes is None:
             n_classes = len(labels)
         if confidences is None:

@@ -96,7 +96,10 @@ class BaseClassifier:
         raise NotImplementedError('predict method must be implemented')
 
     def eval(self):
-        raise NotImplementedError('predict method must be implemented')
+        pass
+
+    def train(self):
+        pass
 
     def to(self, device):
         raise NotImplementedError('predict method must be implemented')
@@ -105,9 +108,6 @@ class BaseClassifier:
         return list()
 
     def get_cls_loss(self, p, t):
-        raise NotImplementedError('predict method must be implemented')
-
-    def train(self):
         raise NotImplementedError('predict method must be implemented')
 
     def set_threshold(self, threshold):

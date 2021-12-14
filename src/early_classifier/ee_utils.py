@@ -4,7 +4,10 @@ from typing import Dict, Type
 
 from early_classifier.base import BaseClassifier
 from early_classifier.faiss_kmeans import FaissKMeansClassifier
+from early_classifier.faiss_knn import FaissKNNClassifier
 from early_classifier.gmm import GMMClassifier
+from early_classifier.gmml import GMMLClassifier
+from early_classifier.knn import KNNClassifier
 from early_classifier.linear import LinearClassifier
 from early_classifier.kmeans import KMeansClassifier
 from early_classifier.sdgm import SDGMClassifier
@@ -14,7 +17,10 @@ models: Dict[str, Type[BaseClassifier]] = {
     'linear': LinearClassifier,
     'faiss_kmeans': FaissKMeansClassifier,
     'sdgm': SDGMClassifier,
-    'gmm': GMMClassifier
+    'gmm': GMMClassifier,
+    'gmm_layer': GMMLClassifier,
+    'knn': KNNClassifier,
+    'faiss_knn': FaissKNNClassifier
 }
 
 
@@ -51,7 +57,7 @@ def iterate_configurations(ee_type, params, device, bn_shape, thresholds='auto')
                  'batch_size': params['batch_size'],
                  'epochs': params['epoch']}
                 for classes_subset in params['labels_subsets']], thresholds
-    if ee_type == 'faiss_kmeans':
+    elif ee_type == 'faiss_kmeans':
         return [{'device': device,
                  'n_labels': classes_subset,
                  'k': clusters_per_class*classes_subset,
@@ -70,13 +76,43 @@ def iterate_configurations(ee_type, params, device, bn_shape, thresholds='auto')
                  'batch_size': params['batch_size'],
                  'epochs': params['epoch']}
                 for classes_subset in params['labels_subsets']], thresholds
+    elif ee_type == 'gmm_layer':
+        return [{'device': device,
+                 'n_labels': classes_subset,
+                 'embedding_size': np.prod(bn_shape),
+                 'optimizer_config': params['optimizer'],
+                 'scheduler_config': params['scheduler'],
+                 # 'criterion_config': params['criterion'],
+                 'batch_size': params['batch_size'],
+                 'epochs': params['epoch']}
+                for classes_subset in params['labels_subsets']], thresholds
+    elif ee_type == 'knn':
+        return [{'device': device,
+                 'n_labels': classes_subset,
+                 'k': n_neighbors,
+                 'threshold': thresholds}
+                for classes_subset in params['labels_subsets']
+                for n_neighbors in params['n_neighbors']], thresholds
+    elif ee_type == 'faiss_knn':
+        return [{'device': device,
+                 'n_labels': classes_subset,
+                 'k': n_neighbors,
+                 'dim': np.prod(bn_shape),
+                 'threshold': thresholds}
+                for classes_subset in params['labels_subsets']
+                for n_neighbors in params['n_neighbors']], thresholds
     else:
         raise UnknownEETypeError(ee_type)
 
 
-def get_ee_model(ee_config, device, bn_shape, pre_trained=False):
+def num_ee_models_variants(ee_config, device, bn_shape):
+    ee_params, _ = iterate_configurations(ee_config['type'], ee_config['params'], device, bn_shape, ee_config['thresholds'])
+    return len(ee_params)
+
+
+def get_ee_model(ee_config, device, bn_shape, pre_trained=False, conf_idx=-1):
     ee_params, threshold = iterate_configurations(ee_config['type'], ee_config['params'], device, bn_shape, ee_config['thresholds'])
-    ee_params, threshold = ee_params[-1], threshold[-1]
+    ee_params, threshold = ee_params[conf_idx], threshold[-1]
     ee_model = models[ee_config['type']](**ee_params)
     if pre_trained:
         if ee_config['type'] == 'kmeans':
@@ -91,10 +127,19 @@ def get_ee_model(ee_config, device, bn_shape, pre_trained=False):
             filename = ee_config['ckpt'].format(ee_params['n_labels'], ee_config['samples_fraction'], ee_model.key_param())
         elif ee_config['type'] == 'sdgm':
             filename = ee_config['ckpt'].format(ee_params['n_labels'], ee_config['samples_fraction'], ee_model.key_param())
+        elif ee_config['type'] == 'gmm_layer':
+            filename = ee_config['ckpt'].format(ee_params['n_labels'], ee_config['samples_fraction'], ee_model.key_param())
+        elif ee_config['type'] == 'knn':
+            filename = ee_config['ckpt'].format(ee_params['n_labels'], ee_config['samples_fraction'], ee_model.key_param())
+        elif ee_config['type'] == 'faiss_knn':
+            filename = ee_config['ckpt'].format(ee_params['n_labels'], ee_config['samples_fraction'], ee_model.key_param())
         else:
             raise UnknownEETypeError(ee_config['type'])
-        ee_model.load(filename)
-        ee_model.set_threshold(threshold)
+        try:
+            ee_model.load(filename)
+            ee_model.set_threshold(threshold)
+        except FileNotFoundError:
+            ee_model = None
     return ee_model
 
 
