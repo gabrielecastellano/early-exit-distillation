@@ -6,6 +6,7 @@ from models.mimic.densenet_mimic import DenseNetHeadMimic, DenseNetMimic
 from models.mimic.inception_mimic import InceptionHeadMimic, InceptionMimic
 from models.mimic.mobilenet_mimic import MobileNetHeadMimic, MobileNetMimic
 from models.mimic.resnet_mimic import ResNetHeadMimic, ResNetMimic
+from models.mimic.dcgan_mimic import DCGANHeadMimic, DCGANMimic
 from myutils.common import file_util, yaml_util
 from utils import mimic_util, module_util
 
@@ -17,7 +18,7 @@ def resume_from_ckpt(ckpt_file_path, model, device, is_student=False):
             return 1, None
         return 1
 
-    print('Resuming from checkpoint..')
+    print('Resuming {} from checkpoint..'.format("Student" if is_student else "Teacher"))
     ckpt = torch.load(ckpt_file_path, map_location=device)
     state_dict = ckpt['model']
     if not is_student and isinstance(model, Inception3) or\
@@ -66,6 +67,8 @@ def get_student_model(teacher_model_type, student_model_config, dataset_name, in
         return ResNetHeadMimic(student_model_version, dataset_name, input_size=input_size, **params_config)
     elif teacher_model_type == 'mobilenet_v2' and student_model_type == 'mobilenet_v2_head_mimic':
         return MobileNetHeadMimic(student_model_version, **params_config)
+    elif teacher_model_type.startswith('resnet') and student_model_type == 'dcgan_head_mimic':
+        return DCGANHeadMimic(student_model_version, dataset_name)
     raise ValueError('teacher_model_type `{}` is not expected'.format(teacher_model_type))
 
 
@@ -104,7 +107,7 @@ def get_tail_network(config, tail_modules):
     raise ValueError('mimic_type `{}` is not expected'.format(mimic_type))
 
 
-def get_mimic_model(config, org_model, teacher_model_type, teacher_model_config, device, head_model=None):
+def get_mimic_model(config, org_model, teacher_model_type, teacher_model_config, device, head_model=None, use_ckpt=False):
     target_model = org_model.module if isinstance(org_model, nn.DataParallel) else org_model
     student_model =\
         load_student_model(config, teacher_model_type, device) if head_model is None else head_model.to(device)
@@ -123,9 +126,17 @@ def get_mimic_model(config, org_model, teacher_model_type, teacher_model_config,
         mimic_model = ResNetMimic(student_model, tail_modules)
     elif mimic_type.startswith('mobilenet'):
         mimic_model = MobileNetMimic(student_model, tail_modules)
+    elif mimic_type.startswith('dcgan_mimic'):
+        mimic_model = DCGANMimic(student_model, tail_modules)
     else:
         raise ValueError('mimic_type `{}` is not expected'.format(mimic_type))
     mimic_model.device = device
+    if use_ckpt:
+        try:
+            ckpt = torch.load(config['mimic_model']['ckpt'])
+            mimic_model.load_state_dict(ckpt['model'])
+        except FileNotFoundError:
+            pass
     return mimic_model.to(device)
 
 
