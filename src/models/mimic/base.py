@@ -59,6 +59,9 @@ class BaseHeadMimic(nn.Module):
             bn_output = self.forward_to_bn(input_)
             return bn_output.shape[1:]
 
+    def freeze_encoder(self):
+        raise NotImplementedError('forward function must be implemented')
+
 
 class BaseMimic(nn.Module):
     def __init__(self, head, tail):
