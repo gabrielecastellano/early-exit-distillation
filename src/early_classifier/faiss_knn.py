@@ -14,6 +14,7 @@ class FaissKNNClassifier(BaseClassifier):
 
     def __init__(self, device, n_labels, k, dim, threshold=0):
         super().__init__(device, n_labels)
+        self.requires_full_fit = True
         self.k = k
         self.dim = dim
         self.model = faiss.IndexFlatL2(int(dim))
@@ -53,19 +54,23 @@ class FaissKNNClassifier(BaseClassifier):
         d = torch.as_tensor(d)
         n = torch.as_tensor(y[n])
         # torch.count_nonzero((n == i), dim=-1)
-        c = torch.stack([1 / (self.k) * (1/d**25 * (n == i).long()).nan_to_num(nan=0, posinf=0).sum(dim=-1)
+        # c = torch.stack([1 / (self.k) * (1/d**25 * (n == i).long()).nan_to_num(nan=0, posinf=0).sum(dim=-1)
+        #                  for i in range(self.n_labels)]).transpose(0, 1)
+        c = torch.stack([(torch.exp(-0.00001*d) * (n == i).long()).nan_to_num(nan=0, posinf=0).sum(dim=-1) / torch.exp(-0.00001*d).nan_to_num(nan=0, posinf=0).sum(dim=-1)
                          for i in range(self.n_labels)]).transpose(0, 1)
         c, l = c.max(dim=-1)
         #c = c[l != y]
         # self._t_up = c.max()
-        self.confidences = c * 0.95
+        self.confidences = c * 0.85
 
     def predict(self, x):
 
         d, n = self.model.search(np.array(x), self.k)
         d = torch.as_tensor(d)
         n = torch.as_tensor(self.y[n])
-        y = torch.stack([1 / self.k * (1 / d ** 25 * (n == i).long()).nan_to_num(nan=0).sum(dim=-1)
+        #y = torch.stack([1 / self.k * (1 / d ** 25 * (n == i).long()).nan_to_num(nan=0).sum(dim=-1)
+        #                 for i in range(self.n_labels)]).transpose(0, 1)
+        y = torch.stack([(torch.exp(-0.00001 * d) * (n == i).long()).nan_to_num(nan=0, posinf=0).sum(dim=-1) / torch.exp(-0.00001 * d).nan_to_num(nan=0, posinf=0).sum(dim=-1)
                          for i in range(self.n_labels)]).transpose(0, 1)
         y = y.to(self.device)
         return y
@@ -95,9 +100,9 @@ class FaissKNNClassifier(BaseClassifier):
 
     def set_threshold(self, threshold):
         if threshold != 'auto':
-            self.share_threshold = threshold
+            self.threshold = threshold
         else:
-            self.share_threshold = 0.5
+            self.threshold = 0.5
 
     def init_results(self):
         d = dict()
@@ -118,6 +123,7 @@ class FaissKNNClassifier(BaseClassifier):
             'confidences': self.confidences,
             'dim': self.dim,
             'model': faiss.serialize_index(self.model),
+            'y': self.y
         })
         return  model_dict
 
@@ -130,6 +136,7 @@ class FaissKNNClassifier(BaseClassifier):
         self.dim = model_dict['dim']
         self.device = model_dict['device']
         self.model = faiss.deserialize_index(model_dict['model'])
+        self.y = model_dict['y']
         self.n_labels = model_dict['n_labels']
         self.threshold = model_dict['threshold']
         self.jointly_trained = model_dict['jointly_trained']
