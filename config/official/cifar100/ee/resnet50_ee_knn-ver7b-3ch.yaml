@@ -1,0 +1,71 @@
+dataset:
+    name: &dataset_name 'cifar100'
+    root: &data_dir './resource/data/cifar100/'
+    data:
+        train: !join [*data_dir, 'train.txt']
+        valid: !join [*data_dir, 'valid.txt']
+        test: !join [*data_dir, 'valid.txt']
+    num_workers: 16
+    normalizer:
+        mean: [0.5070751592371323, 0.48654887331495095, 0.4409178433670343]
+        std: [0.2673342858792401, 0.2564384629170883, 0.27615047132568404]
+
+input_shape: [3, 32, 32]
+
+teacher_model:
+    config: './config/official/cifar100/org/resnet50_32.yaml'
+    extract_designed_module: False
+    start_idx: 0
+    end_idx: 11 # 7, 15, 55 for vers. 1, 2, 3
+
+student_model:
+    type: &smodel_type 'resnet50_head_mimic'
+    version: &ver '7b'
+    params:
+        bottleneck_channels: &bottleneck_channels 3
+        use_aux: False
+    experiment: &distill_experiment !join [*dataset_name, '-', *smodel_type, '-ver', *ver, '-', *bottleneck_channels, 'ch']
+    ckpt: !join ['./resource/ckpt/hnd/', *distill_experiment, '-32.pt']
+
+mimic_model:
+    type: &mmodel_type 'resnet50_mimic'
+    experiment: &mimic_experiment !join [*dataset_name, '-', *mmodel_type, '-ver', *ver, '-', *bottleneck_channels, 'ch']
+    ckpt: !join ['./resource/ckpt/hnd/', *mimic_experiment, '-32.pt']
+
+ee_model:
+    type: &eemodel_type 'knn'
+    experiment: &ee_experiment !join [*dataset_name, '-', *mmodel_type, '-ver', *ver, '-', *bottleneck_channels, 'ch', '-', *eemodel_type]
+    params:
+        labels_subsets: [5]
+        n_neighbors: [100] #[20, 40, 60, 80, 100, 200]
+    thresholds: [0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 0.98]
+    load_embeddings: True
+    store_embeddings: False
+    shuffle_train_set: False
+    device: 'cpu'
+    storage: !join ['./resource/embeddings/', *dataset_name, '-', *mmodel_type, '-ver', *ver, '-', *bottleneck_channels, 'ch-32']
+    samples_fraction: 1.0
+    instance_name: &instance_name !join [*ee_experiment, '_', '{}classes', '_', '{}per-class', '_', 't{}-32']
+    ckpt: !join ['./resource/ckpt/ee/', *instance_name, '.sav']
+
+train:
+    epoch: 20
+    batch_size: 32
+    rough_size: 256
+    interval: -1
+    optimizer:
+        type: 'Adam'
+        params:
+            lr: 0.001
+    scheduler:
+        type: 'MultiStepLR'
+        params:
+            milestones: [5, 10, 15]
+            gamma: 0.1
+    criterion:
+        type: 'MSELoss'
+        params:
+            reduction: 'sum'
+
+test:
+    batch_size: 32
