@@ -5,11 +5,11 @@ import matplotlib.pyplot as plt
 import numpy as np
 
 # '''
-instance = "20211201-201512"
+instance = "20211210-023629"
 experiment_name = "cifar100-resnet50_mimic-ver6b-6ch"
-algorithm = "sdgm"
+algorithm = "knn"
 x_label = "threshold"
-instance_key_str = "components"
+instance_key_str = "k"
 stats_file_s = f"ee_stats/{algorithm}/solo_train-solo_eval/{experiment_name}-{algorithm}_{instance}.json"
 '''
 instance = "20211130-114937"
@@ -42,7 +42,7 @@ with open(stats_file_s, mode='r') as stats_file:
             for x in ee_stats[subset_key][key_param]:
                 o_accuracy.append(ee_stats[subset_key][key_param][x]['overall_accuracy'])
                 accuracy.append(ee_stats[subset_key][key_param][x]['confident_accuracy'])
-                predicted.append(ee_stats[subset_key][key_param][x]['predicted'])
+                predicted.append(ee_stats[subset_key][key_param][x]['coverage'])
                 ks.append(float(x))
             ax1[key_param].plot(ks, accuracy, 'o-', label=f"{classes} classes")
             ax2[key_param].plot(ks, predicted, '.-', label=f"{classes} classes")
