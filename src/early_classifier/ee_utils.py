@@ -5,7 +5,6 @@ from typing import Dict, Type
 from early_classifier.base import BaseClassifier
 from early_classifier.faiss_kmeans import FaissKMeansClassifier
 from early_classifier.faiss_knn import FaissKNNClassifier
-from early_classifier.gmm import GMMClassifier
 from early_classifier.gmml import GMMLClassifier
 from early_classifier.knn import KNNClassifier
 from early_classifier.linear import LinearClassifier
@@ -17,7 +16,6 @@ models: Dict[str, Type[BaseClassifier]] = {
     'linear': LinearClassifier,
     'faiss_kmeans': FaissKMeansClassifier,
     'sdgm': SDGMClassifier,
-    'gmm': GMMClassifier,
     'gmm_layer': GMMLClassifier,
     'knn': KNNClassifier,
     'faiss_knn': FaissKNNClassifier
@@ -37,13 +35,6 @@ def iterate_configurations(ee_type, params, device, bn_shape, thresholds='auto')
     if ee_type == 'kmeans':
         return [{'n_labels': classes_subset,
                  'k': clusters_per_class*classes_subset}
-                for classes_subset in params['labels_subsets']
-                for clusters_per_class in params['clusters_per_labels']], thresholds
-    elif ee_type == 'gmm':
-        return [{'device': device,
-                 'n_labels': classes_subset,
-                 'n_components': clusters_per_class*classes_subset,
-                 'dim': np.prod(bn_shape)}
                 for classes_subset in params['labels_subsets']
                 for clusters_per_class in params['clusters_per_labels']], thresholds
     elif ee_type == 'linear':
@@ -121,8 +112,6 @@ def get_ee_model(ee_config, device, bn_shape, pre_trained=False, conf_idx=-1):
     if pre_trained:
         if ee_config['type'] == 'kmeans':
             filename = ee_config['ckpt'].format(ee_params['n_labels'], ee_config['samples_fraction'], ee_model.key_param())
-        elif ee_config['type'] == 'gmm':
-            filename = ee_config['ckpt'].format(ee_params['n_labels'], ee_config['samples_fraction'], ee_model.key_param())
         elif ee_config['type'] == 'linear':
             filename = ee_config['ckpt'].format(ee_params['n_labels'], ee_config['samples_fraction'], ee_model.key_param())
         elif ee_config['type'] == 'faiss_kmeans':
@@ -153,8 +142,10 @@ def get_model_type(model_cls):
             return k
 
 
+'''
 def requires_normalization(model_type):
     if model_type == 'gmm_layer':
         return True
     else:
         return False
+'''
