@@ -13,9 +13,9 @@ from utils import dataset_util
 
 class KNNClassifier(BaseClassifier):
 
-
     def __init__(self, device, n_labels, k, threshold=0):
         super().__init__(torch.device('cpu'), n_labels)
+        self.requires_full_fit = True
         self.k = k
         self.model = KNeighborsClassifier(n_neighbors=k)
         self.label_share = np.zeros([self.k, n_labels], dtype=int)

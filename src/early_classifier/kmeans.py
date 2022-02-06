@@ -10,9 +10,9 @@ from early_classifier.ee_dataset import EmbeddingDataset
 
 class KMeansClassifier(BaseClassifier):
 
-
     def __init__(self, n_labels, k, threshold=0):
         super().__init__(torch.device('cpu'), n_labels)
+        self.requires_full_fit = True
         self.k = k
         self.model = KMeans(n_clusters=self.k)
         self.label_share = np.zeros([self.k, n_labels], dtype=int)
