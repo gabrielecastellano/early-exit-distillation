@@ -56,7 +56,7 @@ class BaseHeadMimic(nn.Module):
         self.eval()
         with torch.no_grad():
             input_ = torch.empty(1, input_shape[0], input_shape[1], input_shape[2], device=device)
-            bn_output = self.forward_to_bn(input_)
+            bn_output, *_ = self.forward_to_bn(input_)
             return bn_output.shape[1:]
 
     def freeze_encoder(self):
