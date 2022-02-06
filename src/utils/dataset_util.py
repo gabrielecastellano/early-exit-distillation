@@ -153,6 +153,7 @@ def get_datasets(dataset_config, compression_type=None, compressed_size=None, no
             transforms.Resize(rough_size),
             transforms.RandomCrop(reshape_size),
             transforms.RandomHorizontalFlip(),
+            transforms.RandomRotation(15),
             transforms.ToTensor(),
             transforms.Normalize(mean, std)
         ])
@@ -201,7 +202,7 @@ def get_datasets(dataset_config, compression_type=None, compressed_size=None, no
     return train_dataset, valid_dataset, test_dataset
 
 
-def get_loader(dataset, shuffle=False, order_labels=False, n_labels=None, batch_size=64, pin_memory=False):
+def get_loader(dataset, shuffle=False, order_labels=False, n_labels=None, batch_size=32, pin_memory=False):
     """
 
     Args:

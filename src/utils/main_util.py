@@ -106,6 +106,7 @@ def compute_accuracy(output, target, topk=(1,)):
     if len(target) == 0:
         return [torch.zeros(1) for _ in topk]
     maxk = max(topk)
+    maxk = min(maxk, output.size(1))
     batch_size = target.size(0)
     _, pred = output.topk(maxk, 1, True, True)
     pred = pred.t()

@@ -63,11 +63,11 @@ class SmoothedValue(object):
 
     def __str__(self):
         return self.fmt.format(
-            median=self.median,
-            avg=self.avg,
-            global_avg=self.global_avg,
-            max=self.max,
-            value=self.value)
+            median=round_at_significant(self.median, 5),
+            avg=round_at_significant(self.avg, 5),
+            global_avg=round_at_significant(self.global_avg, 5),
+            max=round_at_significant(self.max, 5),
+            value=round_at_significant(self.value, 5))
 
 
 class CtrValue(object):
@@ -134,11 +134,11 @@ class CtrValue(object):
 
     def __str__(self):
         return self.fmt.format(
-            median=self.median,
-            avg=self.avg,
-            global_avg=self.global_avg,
-            max=self.max,
-            value=self.value)
+            median=round_at_significant(self.median, 5),
+            avg=round_at_significant(self.avg, 5),
+            global_avg=round_at_significant(self.global_avg, 5),
+            max=round_at_significant(self.max, 5),
+            value=round_at_significant(self.value, 5))
 
 
 class MetricLogger(object):
@@ -184,7 +184,7 @@ class MetricLogger(object):
     def add_counter(self, name, counter):
         self.counters[name] = counter
 
-    def log_every(self, iterable, print_freq, header=None):
+    def log_every(self, iterable, print_freq, header=None, verbose=True):
         i = 0
         if not header:
             header = ''
@@ -222,19 +222,25 @@ class MetricLogger(object):
                 eta_string = str(datetime.timedelta(seconds=int(eta_seconds)))
                 if i == len(iterable) - 1:
                     i = len(iterable)
-                if torch.cuda.is_available():
-                    print(log_msg.format(
-                        i, len(iterable), eta=eta_string,
-                        meters=str(self),
-                        time=str(iter_time), data=str(data_time),
-                        memory=torch.cuda.max_memory_allocated() / MB))
-                else:
-                    print(log_msg.format(
-                        i, len(iterable), eta=eta_string,
-                        meters=str(self),
-                        time=str(iter_time), data=str(data_time)))
+                if verbose:
+                    if torch.cuda.is_available():
+                        print(log_msg.format(
+                            i, len(iterable), eta=eta_string,
+                            meters=str(self),
+                            time=str(iter_time), data=str(data_time),
+                            memory=torch.cuda.max_memory_allocated() / MB))
+                    else:
+                        print(log_msg.format(
+                            i, len(iterable), eta=eta_string,
+                            meters=str(self),
+                            time=str(iter_time), data=str(data_time)))
             i += 1
             end = time.time()
         total_time = time.time() - start_time
         total_time_str = str(datetime.timedelta(seconds=int(total_time)))
         print('{} Total time: {}'.format(header, total_time_str))
+
+
+def round_at_significant(x, d):
+    # return round(x, - int(floor(log10(abs(x)))) + (d - 1))
+    return x
