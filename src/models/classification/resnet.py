@@ -106,8 +106,8 @@ def resnet_model(model_type, param_config, pretrained=False, weights=None, load_
     elif model_type == 'resnet50':
         model = models.resnet50(**param_config)
         model.conv1 = nn.Conv2d(3, 64, kernel_size=xtr_k, stride=xtr_s, padding=xtr_p, bias=False)
-        model.maxpool = nn.Identity()
-        model.fc = nn.Linear(model.fc.in_features, param_config["num_classes"])
+        if input_size == 32:
+            model.maxpool = nn.Identity()
     elif model_type == 'resnet101':
         model = resnet101(param_config)
     elif model_type == 'resnet152':
