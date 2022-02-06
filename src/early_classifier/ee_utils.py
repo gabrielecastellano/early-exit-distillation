@@ -79,12 +79,16 @@ def iterate_configurations(ee_type, params, device, bn_shape, thresholds='auto')
     elif ee_type == 'gmm_layer':
         return [{'device': device,
                  'n_labels': classes_subset,
+                 'n_components': params['n_components'],
+                 'cov_type': params['cov_type'],
                  'embedding_size': np.prod(bn_shape),
                  'optimizer_config': params['optimizer'],
                  'scheduler_config': params['scheduler'],
-                 # 'criterion_config': params['criterion'],
+                 'criterion_config': params['criterion'],
                  'batch_size': params['batch_size'],
-                 'epochs': params['epoch']}
+                 'v_batch_size': params['v_batch_size'],
+                 'epochs': params['epoch'],
+                 'components_init': params['components_init']}
                 for classes_subset in params['labels_subsets']], thresholds
     elif ee_type == 'knn':
         return [{'device': device,
@@ -147,3 +151,10 @@ def get_model_type(model_cls):
     for k, c in models.items():
         if c == model_cls:
             return k
+
+
+def requires_normalization(model_type):
+    if model_type == 'gmm_layer':
+        return True
+    else:
+        return False

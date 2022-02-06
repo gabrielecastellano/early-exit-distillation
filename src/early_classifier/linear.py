@@ -1,15 +1,11 @@
 import torch
 
-from torch.utils.data import Dataset, RandomSampler
-
 from early_classifier.base import BaseClassifier
-from early_classifier.ee_dataset import EmbeddingDataset
 from structure.logger import MetricLogger
 from myutils.pytorch import func_util
 
 
 class LinearClassifier(BaseClassifier):
-
 
     def __init__(self, device, n_labels, embedding_size, optimizer_config, scheduler_config, criterion_config,
                  validation_dataset, batch_size=32, epochs=100, threshold=0.5):
@@ -23,11 +19,13 @@ class LinearClassifier(BaseClassifier):
         self.scheduler = func_util.get_scheduler(self.optimizer, scheduler_config['type'], scheduler_config['params'])
         self.batch_size = batch_size
         self.threshold = threshold
+        self.confidences = []
 
     def fit(self, data_loader, epoch=0):
 
         metric_logger = MetricLogger(delimiter='  ')
         header = 'TRAIN EE (LINEAR): epoch {}'.format(epoch)
+        self.confidences = []
         self.model.train()
         for sample_batch, targets in metric_logger.log_every(data_loader, len(data_loader.dataset), header=header):
             sample_batch, targets = sample_batch.to(self.device), targets.to(self.device)
@@ -37,6 +35,7 @@ class LinearClassifier(BaseClassifier):
             loss.backward()
             self.optimizer.step()
             metric_logger.update(loss=loss.item(), lr=self.optimizer.param_groups[0]['lr'])
+            self.confidences.extend(self.get_prediction_confidences(outputs).tolist())
         self.scheduler.step()
 
     def predict(self, x):
@@ -78,7 +77,10 @@ class LinearClassifier(BaseClassifier):
             'batch_size': self.batch_size,
             'threshold': self.threshold,
             'device': self.device,
-            'jointly_trained': self.jointly_trained
+            'jointly_trained': self.jointly_trained,
+            'confidences': self.confidences,
+            'last_epoch': self.last_epoch,
+            'performance': self.performance
         })
         return model_dict
 
@@ -93,6 +95,9 @@ class LinearClassifier(BaseClassifier):
         self.batch_size = model_dict['batch_size']
         self.threshold = model_dict['threshold']
         self.jointly_trained = model_dict['jointly_trained']
+        self.confidences = model_dict['confidences']
+        self.last_epoch = model_dict['last_epoch'] if 'last_epoch' in model_dict else -1
+        self.performance = model_dict['performance'] if 'performance' in model_dict else 0.0
 
     def save(self, filename):
         model_dict = self.to_state_dict()
@@ -118,3 +123,23 @@ class LinearClassifier(BaseClassifier):
 
     def train(self):
         self.model.train()
+
+    def get_kl_divergence(self, mu, logvar, targets):
+        mu = self.model(mu)
+        logvar = self.model(logvar)
+        kld = 0
+        for i in range(0, mu.size(0), self.batch_size):
+            j = i+self.batch_size
+            for c in range(self.n_labels):
+                t = torch.zeros(self.n_labels, device=self.device)
+                t[c] = 1
+                # P = torch.distributions.MultivariateNormal(t, torch.eye(t.shape[0]))
+                mu_c = mu[i:j][targets[i:j] == c]
+                logvar_c = logvar[i:j][targets[i:j] == c]
+                if mu_c.shape[0] <= 0:
+                    continue
+                kld += 0.5 * (- logvar_c.sum(dim=1)
+                              - self.n_labels
+                              + torch.einsum('bs,bs->b', mu_c - t, mu_c - t)
+                              + logvar_c.exp().sum(dim=1)).sum()
+        return kld
