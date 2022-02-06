@@ -9,9 +9,9 @@ from utils import dataset_util
 
 class FaissKMeansClassifier(BaseClassifier):
 
-
-    def __init__(self, device, n_labels, k, dim, niter=10, threshold=0):
+    def __init__(self, device, n_labels, k, dim, niter=10, threshold=0.5):
         super().__init__(device, n_labels)
+        self.requires_full_fit = True
         self.k = k
         self.dim = dim
         self.niter = niter
@@ -23,8 +23,6 @@ class FaissKMeansClassifier(BaseClassifier):
         self.cluster_sizes = np.zeros(self.k, dtype=int)
         self.valid_shares = None
         self.share_threshold = threshold
-        if type(threshold) == list:
-            self.share_threshold = threshold[0]
         self.share_threshold = self.share_threshold if self.share_threshold != 'auto' else 0.5
         self.distances_q = None
         self.dataset = None
@@ -42,9 +40,9 @@ class FaissKMeansClassifier(BaseClassifier):
 
         self.dataset = data_loader.dataset
 
-        x = data_loader.dataset.data
-        y = data_loader.dataset.targets
-        c = data_loader.dataset.confidences
+        x = np.array(data_loader.dataset.data)
+        y = np.array(data_loader.dataset.targets)
+        c = np.array(data_loader.dataset.confidences)
 
         # clustering
         self.model.train(x)
